@@ -214,6 +214,7 @@ public class SlimeBridgeServer
                ",\"cx\":" + ar.cx.ToString(CultureInfo.InvariantCulture) +
                ",\"cz\":" + ar.cz.ToString(CultureInfo.InvariantCulture) +
                ",\"cyaw\":" + ar.cyaw.ToString(CultureInfo.InvariantCulture) +
+               ",\"pitch\":" + ar.pitchDelta.ToString(CultureInfo.InvariantCulture) +
                ",\"area\":" + SimpleJson.Esc(ar.area ?? "") +
                ",\"note\":" + SimpleJson.Esc(ar.note ?? "") +
                ",\"payload\":" + SimpleJson.Esc(ar.payload ?? "") + "}";

@@ -371,18 +371,20 @@ class WalkCaptureIO:
             return {"ok": True, "note": "已走到结晶市场投入口前"}
         return {"ok": False, "note": "未能走到结晶市场投入口"}
 
-    def _pitch_toward(self, tol: float = 4.0, max_steps: int = 8) -> bool:
-        """闭环收敛视线俯仰到投入口：mod 报 pitch_delta(正=需抬头)，移鼠标补偿再复测。
+    def _pitch_toward(self, rescanner=None, tol: float = 4.0, max_steps: int = 8) -> bool:
+        """闭环收敛视线俯仰到目标：所有 scan 现在统一带 pitch(相机相对, 正=需抬头)。
 
-        盲猜上抬像素是"投进市场不加钱"的根因；改成和 yaw 一样的反馈收敛。
+        rescanner 返回带 pitch 的 scan 结果；缺省用市场投入口。瞬移后镜头没对准时
+        这里的鼠标补偿会真实把镜头转到目标（修"瞬移后不动作"的另一半根因）。
         """
+        scan = rescanner or self._scan_port_close
         win = self._load()
         if win is None or win is False:
             return False
         for _ in range(max_steps):
             if self._aborted():
                 return False
-            m = self._scan_port_close()
+            m = scan()
             if not m.get("ok"):
                 return False
             pd = float(m.get("pitch", 0.0) or 0.0)
@@ -394,7 +396,7 @@ class WalkCaptureIO:
             except Exception:
                 return False
             time.sleep(0.25)
-        m = self._scan_port_close()
+        m = scan()
         return abs(float(m.get("pitch", 0.0) or 0.0)) <= (tol + 3.0)
 
     def collect_scanned(self, scanner, label: str) -> Dict[str, Any]:
@@ -543,7 +545,8 @@ class WalkCaptureIO:
         scanner = self.io.scan_food if kind == "food" else self.io.scan_plort
         target = scanner()
         if target.get("ok"):
-            self._turn_toward(target, rescanner=scanner, max_steps=6)
+            self._turn_toward(target, rescanner=scanner, max_steps=12)
+            self._pitch_toward(scanner)          # 瞬移只改身体朝向，镜头要用鼠标真实转过去
         vac = self._vacuum(0.9)
         if vac.get("aborted"):
             return vac
@@ -561,7 +564,8 @@ class WalkCaptureIO:
         if win not in (None, False):
             target = self.io.scan_corral() if hasattr(self.io, "scan_corral") else {"ok": False}
             if target.get("ok"):
-                self._turn_toward(target, rescanner=self.io.scan_corral, max_steps=6)
+                self._turn_toward(target, rescanner=self.io.scan_corral, max_steps=12)
+                self._pitch_toward(self.io.scan_corral)   # 镜头真实对准围栏再投
             try:
                 center = self._center()
                 if center:
@@ -862,9 +866,10 @@ class WalkCaptureIO:
             return {"ok": False, "note": "未找到游戏窗口"}
         target = self.io.scan_corral() if hasattr(self.io, "scan_corral") else {"ok": False}
         if target.get("ok"):
-            self._turn_toward(target, rescanner=self.io.scan_corral, max_steps=8)
+            self._turn_toward(target, rescanner=self.io.scan_corral, max_steps=12)
+            self._pitch_toward(self.io.scan_corral)   # 镜头对准围栏(略微俯视)再投掷
         try:
-            win.mouse_move_rel(0, 30)
+            win.mouse_move_rel(0, 8)                   # 微调余量：投出物弧线略下压进围栏
             time.sleep(0.1)
             center = self._center()
             if center:

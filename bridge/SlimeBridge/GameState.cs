@@ -40,6 +40,7 @@ namespace SlimeBridge
         public float px, py;             // 玩家世界坐标(供 core 漫游/校验)
         public float tx, tz;             // 目标世界坐标
         public float cx, cz, cyaw;       // 结晶市场中心坐标 + 朝向中心偏角（scan_market 用：投掷目标）
+        public float pitchDelta;         // 相机→目标俯仰角差(度，正=需抬头)。所有 scan 统一提供
         public string payload = "";      // 列表类结果（scan_facilities / ui_buttons / scan_plot 的附加信息）的 JSON 字符串
     }
 
@@ -794,7 +795,7 @@ namespace SlimeBridge
             if (_player == null) { ar.ok = false; ar.note = "未进入存档"; return; }
             const float SEARCH_RADIUS = 220f;
             Vector3 p = _player.transform.position;
-            Vector3 forward = _player.transform.forward;
+            Vector3 forward = AimForward();
             ar.px = p.x; ar.py = p.z;
 
             float bestDS = SEARCH_RADIUS;       // 最近野生史莱姆
@@ -888,6 +889,7 @@ namespace SlimeBridge
             ar.yawDelta = yaw;
             ar.ok = true;
             ar.note = "已定位目标 kind=" + bestKind + " dist=" + bestD.ToString("F1") + "m yaw=" + yaw.ToString("F1") + "°";
+            SetPitchDelta(ar, bestT);
         }
 
         private static bool IsFood(Identifiable.Id id)
@@ -902,10 +904,41 @@ namespace SlimeBridge
                 || n.IndexOf("CHICK", StringComparison.Ordinal) >= 0;
         }
 
+        // 瞄准用的"前方"：一律取相机朝向（准星真正指向），玩家身体朝向仅作兜底。
+        // 瞬移(StandAt/tp_market)只改 player.rotation 不改相机——用身体朝向算 yaw 会
+        // 在瞬移后谎报"已对准"，鼠标闭环被跳过、准星其实还指旧方向（瞬移后不动作的根因）。
+        private Vector3 AimForward()
+        {
+            try
+            {
+                var cam = Camera.main;
+                if (cam != null && cam.transform != null) return cam.transform.forward;
+            }
+            catch (Exception) { }
+            return _player != null ? _player.transform.forward : Vector3.forward;
+        }
+
+        // 相机→目标 的俯仰角差(度，正=需抬头)，写入 ar.pitchDelta。
+        private void SetPitchDelta(ActionResult ar, Vector3 target)
+        {
+            try
+            {
+                Vector3 p = _player.transform.position;
+                Vector3 toT = target - p;
+                float flatLen = new Vector3(toT.x, 0f, toT.z).magnitude;
+                if (flatLen < 0.001f || toT.magnitude < 0.001f) return;
+                float desired = Mathf.Atan2(toT.y, flatLen) * Mathf.Rad2Deg;
+                Vector3 f = AimForward();
+                float current = Mathf.Asin(Mathf.Clamp(f.y, -1f, 1f)) * Mathf.Rad2Deg;
+                ar.pitchDelta = desired - current;
+            }
+            catch (Exception) { }
+        }
+
         private void FillAim(ActionResult ar, Vector3 target, string kind, float dist, string note)
         {
             Vector3 p = _player.transform.position;
-            Vector3 forward = _player.transform.forward;
+            Vector3 forward = AimForward();
             ar.px = p.x; ar.py = p.z;
             Vector3 toT = target - p; toT.y = 0f;
             Vector3 flatF = forward; flatF.y = 0f;
@@ -918,6 +951,7 @@ namespace SlimeBridge
             ar.yawDelta = yaw;
             ar.ok = true;
             ar.note = note;
+            SetPitchDelta(ar, target);
         }
 
         // 牧场经营：只找食物（水果/蔬菜/鸡），围栏里正在被吃的不算。
@@ -994,7 +1028,7 @@ namespace SlimeBridge
             {
                 var plots = UnityEngine.Object.FindObjectsOfType<LandPlot>();
                 Vector3 p = _player.transform.position;
-                Vector3 forward = _player.transform.forward;
+                Vector3 forward = AimForward();
                 ar.px = p.x; ar.py = p.z;
                 float bestD = float.MaxValue;
                 Vector3 bestT = Vector3.zero;
@@ -1022,6 +1056,7 @@ namespace SlimeBridge
                 ar.yawDelta = yaw;
                 ar.ok = true;
                 ar.note = "已定位最近围栏 dist=" + bestD.ToString("F1") + "m yaw=" + yaw.ToString("F1") + "°";
+                SetPitchDelta(ar, bestT);
             }
             catch (Exception e) { ar.ok = false; ar.note = "扫描围栏异常: " + e.Message; }
         }
@@ -1452,8 +1487,7 @@ namespace SlimeBridge
                 }
                 if (_cachedMarket == null) { ar.ok = false; ar.note = "场景中找不到结晶市场"; return; }
                 Vector3 p = _player.transform.position;
-                Vector3 forward = _player.transform.forward;
-                var cam = Camera.main;
+                Vector3 forward = AimForward();
                 ar.px = p.x; ar.py = p.z;
                 Vector3 flatF = forward; flatF.y = 0f;
                 // 站位点：投入口开孔 + 朝庭院方向 * 14m（站在庭院里面对开孔，可把结晶投进去）
@@ -1477,24 +1511,8 @@ namespace SlimeBridge
                 ar.area = ZoneToName(CurrentZone());
                 // 俯仰角差（度，正=需要抬头）：相机 forward 与"指向投入口"方向的垂直夹角，
                 // 供 core 像收敛 yaw 一样闭环收敛 pitch 后再投掷（盲猜俯仰是卖不进的根因）。
-                float pitchDelta = 0f;
-                try
-                {
-                    var camT = cam != null ? cam.transform : null;
-                    if (camT != null)
-                    {
-                        Vector3 toPort3 = port - p;
-                        float flatLen = new Vector3(toPort3.x, 0f, toPort3.z).magnitude;
-                        if (flatLen > 0.001f && toPort3.magnitude > 0.001f)
-                        {
-                            float desired = Mathf.Atan2(toPort3.y, flatLen) * Mathf.Rad2Deg;
-                            float current = Mathf.Asin(Mathf.Clamp(camT.forward.y, -1f, 1f)) * Mathf.Rad2Deg;
-                            pitchDelta = desired - current;
-                        }
-                    }
-                }
-                catch (Exception) { pitchDelta = 0f; }
-                ar.payload = "{\"pitch_delta\":" + pitchDelta.ToString("F2", CultureInfo.InvariantCulture) + "}";
+                SetPitchDelta(ar, port);
+                ar.payload = "{\"pitch_delta\":" + ar.pitchDelta.ToString("F2", CultureInfo.InvariantCulture) + "}";
                 ar.ok = true;
                 ar.note = "已定位结晶市场投入口 站位=" + standDist.ToString("F1") + "m yaw=" + standYaw.ToString("F1") + "° 区域=" + ar.area;
             }

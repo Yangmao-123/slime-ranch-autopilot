@@ -196,6 +196,7 @@ class BridgeIOController:
             "yaw": f("yaw_delta", 0.0),
             "px": f("px", 0.0), "py": f("py", 0.0),
             "tx": f("tx", 0.0), "tz": f("tz", 0.0),
+            "pitch": f("pitch", 0.0),                     # 相机→目标俯仰差(度, 正=需抬头)
             "note": res.get("note", ""),
         }
 
@@ -218,6 +219,7 @@ class BridgeIOController:
             "yaw": f("yaw_delta", 0.0),
             "px": f("px", 0.0), "py": f("py", 0.0),
             "tx": f("tx", 0.0), "tz": f("tz", 0.0),
+            "pitch": f("pitch", 0.0),                     # 相机→目标俯仰差(度, 正=需抬头)
             "note": res.get("note", ""),
         }
 
@@ -233,9 +235,8 @@ class BridgeIOController:
                 return float(v) if v is not None and v != "" else default
             except Exception:
                 return default
-        payload = self._payload_dict(res)
         try:
-            pitch = float(payload.get("pitch_delta") or 0.0)
+            pitch = f("pitch", 0.0)
         except Exception:
             pitch = 0.0
         return {
@@ -269,6 +270,7 @@ class BridgeIOController:
             "yaw": f("yaw_delta", 0.0),
             "px": f("px", 0.0), "py": f("py", 0.0),
             "tx": f("tx", 0.0), "tz": f("tz", 0.0),
+            "pitch": f("pitch", 0.0),                     # 相机→目标俯仰差(度, 正=需抬头)
             "note": res.get("note", ""),
         }
 
@@ -351,6 +353,7 @@ class BridgeIOController:
             "yaw": f("yaw_delta", 0.0),
             "px": f("px", 0.0), "py": f("py", 0.0),
             "tx": f("tx", 0.0), "tz": f("tz", 0.0),
+            "pitch": f("pitch", 0.0),                     # 相机→目标俯仰差(度, 正=需抬头)
             "note": res.get("note", ""),
         }
 
