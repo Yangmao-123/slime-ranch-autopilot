@@ -315,6 +315,8 @@ class Brain:
         hotkey_ok = self._hotkey.start()
         if not hotkey_ok:
             self.c.say("【提示】V 键热键没有挂上；可在插件控制台切换观望或自主经营")
+        else:
+            self.c.say(f"【提示】V 键热键已挂上（{getattr(self._hotkey, 'backend', '')}），按 V 切换观望/自主经营")
         self.c.say("NEKO 已连接史莱姆牧场。当前是观望，按 V 键进入自主经营。" if self.mode != "ranch"
                    else "NEKO 已连接史莱姆牧场。当前是自主经营，按 V 键回到观望。")
         self._push_overlay()

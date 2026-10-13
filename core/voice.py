@@ -72,6 +72,7 @@ class HotkeyListener:
         self._stop = threading.Event()
         self._hook_ready = threading.Event()
         self._hook_ok = False
+        self.backend = ""                    # 实际生效的热键后端(win32-hook / pynput)
 
     def _fire(self) -> None:
         now = time.time()
@@ -141,19 +142,29 @@ class HotkeyListener:
             user32.UnhookWindowsHookEx(hook)
 
     def start(self) -> bool:
-        if _HAS_PYNPUT:
-            target = self._listen
-        elif sys.platform == "win32":
-            target = self._listen_win32
-        else:
-            return False
-        self._hook_ready.clear()
-        self._thread = threading.Thread(target=target, daemon=True)
-        self._thread.start()
-        if target is self._listen_win32:
+        """挂上全局热键，返回是否成功。
+
+        Windows 上优先用低级键盘钩子（按 vkCode 判定，**免疫中文输入法**——pynput 的
+        key.char=='v' 在 IME 开着时收不到裸 'v'，这是 V 键失灵的主因），失败再退 pynput
+        （pynput 挂掉时线程会静默退出，故用 is_alive 校验）。
+        """
+        if sys.platform == "win32":
+            self._hook_ready.clear()
+            self._thread = threading.Thread(target=self._listen_win32, daemon=True)
+            self._thread.start()
             self._hook_ready.wait(1.0)
-            return self._hook_ok
-        return True
+            if self._hook_ok:
+                self.backend = "win32-hook"
+                return True
+        if _HAS_PYNPUT:
+            t = threading.Thread(target=self._listen, daemon=True)
+            t.start()
+            time.sleep(0.4)
+            if t.is_alive():
+                self._thread = t
+                self.backend = "pynput"
+                return True
+        return False
 
     def stop(self) -> None:
         self._stop.set()
