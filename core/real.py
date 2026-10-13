@@ -536,7 +536,11 @@ class WalkCaptureIO:
                 "note": "投进市场后资金没有增加，这次不算卖出"}
 
     def grab_here(self, kind: str) -> Dict[str, Any]:
-        """瞬移到食物或结晶旁边，再吸附。不走路。"""
+        """瞬移到食物或结晶旁边，再吸附。不走路。
+
+        成败判定用 mod 权威复核（吸附后目标从世界消失=吸到）：帧差视觉判定在本机
+        DPI 虚拟化下抓图错位，吸没吸到都会误判成"画面没有变化"。
+        """
         self._dismiss_if_paused()
         label = "食物" if kind == "food" else "结晶"
         tp = self.io.tp_item(kind) if hasattr(self.io, "tp_item") else {"ok": False, "note": "无法瞬移"}
@@ -547,17 +551,20 @@ class WalkCaptureIO:
         for attempt in range(2):
             self._dismiss_if_paused()          # 吸附窗口可能正好被 NEKO 说话触发暂停
             target = scanner()
-            if target.get("ok"):
-                self._turn_toward(target, rescanner=scanner, max_steps=12)
-                self._pitch_toward(scanner)    # 瞬移只改身体朝向，镜头要用鼠标真实转过去
+            if not target.get("ok"):
+                return {"ok": False, "note": target.get("note", "附近没有%s" % label)}
+            d0 = float(target.get("dist", 1e9))
+            self._turn_toward(target, rescanner=scanner, max_steps=12)
+            self._pitch_toward(scanner)        # 瞬移只改身体朝向，镜头要用鼠标真实转过去
             vac = self._vacuum(0.9)
             if vac.get("aborted"):
                 return vac
-            if vac.get("visual"):
+            after = scanner()
+            if (not after.get("ok")) or float(after.get("dist", 1e9)) > d0 + 8:
                 return {"ok": True, "note": "已瞬移到%s旁边并吸起%s" % (
                     label, "" if attempt == 0 else "（重试成功）")}
             time.sleep(0.4)
-        return {"ok": False, "note": "%s，但吸附后画面没有变化" % tp.get("note", "")}
+        return {"ok": False, "note": "%s，但吸附后目标仍在原地（可能未吸中）" % tp.get("note", "")}
 
     def feed_here(self) -> Dict[str, Any]:
         """瞬移到围栏前，做出投喂，并尝试把食物放进喂食器。"""

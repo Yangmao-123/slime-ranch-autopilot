@@ -552,6 +552,7 @@ namespace SlimeBridge
                             case "tp_item": TeleportItemReal(kind, ar); break;
                             case "feed_show": FeedShowReal(ar); break;
                             case "debug_types": DebugTypesReal(kind, ar); break;
+                            case "debug_cams": DebugCamsReal(ar); break;
                             case "debug_market": DebugMarketReal(ar); break;
                             case "probe": ProbeNearReal(ar, kind); break;
                             case "continue": ContinueSaveReal(ar); break;
@@ -905,14 +906,38 @@ namespace SlimeBridge
                 || n.IndexOf("CHICK", StringComparison.Ordinal) >= 0;
         }
 
-        // 瞄准用的"前方"：一律取相机朝向（准星真正指向），玩家身体朝向仅作兜底。
-        // 瞬移(StandAt/tp_market)只改 player.rotation 不改相机——用身体朝向算 yaw 会
-        // 在瞬移后谎报"已对准"，鼠标闭环被跳过、准星其实还指旧方向（瞬移后不动作的根因）。
+        // 瞄准用的"前方"：相机朝向（准星真正指向）。
+        // ⚠️ Camera.main 在 SR1 里可能返回不随视角旋转的相机（实测鼠标大幅移动其
+        // forward 纹丝不动，导致 yaw 闭环永远不收敛）。策略：优先取**挂在玩家层级
+        // 下且启用**的相机（跟随视角的那个），其次按 depth 最大的启用相机，最后才
+        // 是 Camera.main。玩家身体朝向仅作最终兜底。
+        private Camera _aimCam;
+        private Camera AimCamera()
+        {
+            try
+            {
+                Camera best = null; float bestDepth = float.MinValue;
+                foreach (var c in Camera.allCameras)
+                {
+                    if (c == null || !c.enabled || c.transform == null) continue;
+                    bool childOfPlayer = false;
+                    try { childOfPlayer = _player != null && c.transform.IsChildOf(_player.transform); } catch (Exception) { }
+                    if (childOfPlayer) { _aimCam = c; return c; }
+                    if (c.depth > bestDepth) { bestDepth = c.depth; best = c; }
+                }
+                if (best != null) { _aimCam = best; return best; }
+            }
+            catch (Exception) { }
+            var main = Camera.main;
+            _aimCam = main;
+            return main;
+        }
+
         private Vector3 AimForward()
         {
             try
             {
-                var cam = Camera.main;
+                var cam = AimCamera();
                 if (cam != null && cam.transform != null) return cam.transform.forward;
             }
             catch (Exception) { }
@@ -1813,6 +1838,31 @@ namespace SlimeBridge
                 ar.note = sb.ToString();
             }
             catch (Exception e) { ar.ok = false; ar.note = "debug_types 异常: " + e.Message; }
+        }
+
+        // ---- 相机内省（诊断：找出真正随视角旋转的相机）----
+        private void DebugCamsReal(ActionResult ar)
+        {
+            try
+            {
+                var sb = new System.Text.StringBuilder();
+                var chosen = AimCamera();
+                foreach (var c in Camera.allCameras)
+                {
+                    if (c == null) continue;
+                    bool child = false;
+                    try { child = _player != null && c.transform.IsChildOf(_player.transform); } catch (Exception) { }
+                    sb.Append(c.name).Append(" depth=").Append(c.depth)
+                      .Append(" enabled=").Append(c.enabled)
+                      .Append(" childOfPlayer=").Append(child)
+                      .Append(" fwd=").Append(c.transform.forward.ToString("F2"))
+                      .Append(c == chosen ? "  <== AIM" : "").Append("\n");
+                }
+                sb.Append("main=").Append(Camera.main != null ? Camera.main.name : "null");
+                ar.ok = true;
+                ar.note = sb.ToString();
+            }
+            catch (Exception e) { ar.ok = false; ar.note = "debug_cams 异常: " + e.Message; }
         }
 
         // ---- 状态汇总（整体投放到 Unity 主线程读取）----
