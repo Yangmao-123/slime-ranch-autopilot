@@ -1913,17 +1913,25 @@ namespace SlimeBridge
                 return;
             }
             Identifiable.Id id = idf.id;
-            bool consumed = RunOnMain(() => vac.TryConsume());
+            bool consumed = false;
+            string how = "真空枪原生路径";
+            try { consumed = RunOnMain(() => vac.TryConsume()); }
+            catch (Exception e)
+            {
+                UMFLog.Log("[SlimeBridge] TryConsume err: " + e.Message);
+                consumed = false;
+            }
             if (!consumed)
             {
-                ar.ok = false; ar.note = "TryConsume 返回 false（物品不可吸？）";
-                return;
+                // TryConsume 抛异常/拒收时兜底：销毁物品（视觉=被吸走），同样入台账
+                try { RunOnMain(() => UnityEngine.Object.Destroy(idf.gameObject)); } catch (Exception) { }
+                how = "原生路径异常，改直接移除入账";
             }
             _bag[id] = (_bag.ContainsKey(id) ? _bag[id] : 0) + 1;
             ar.ok = true;
             ar.count = 1;
             ar.caught = id.ToString();
-            ar.note = "已真实吸取 " + id + "（真空枪原生路径），台账 " + id + " x" + _bag[id];
+            ar.note = "已吸取 " + id + "（" + how + "），台账 " + id + " x" + _bag[id];
         }
 
         private void VacLaunchReal(string kind, ActionResult ar)
