@@ -2004,14 +2004,27 @@ namespace SlimeBridge
             Vector3 dir = (target - origin);
             float dist = dir.magnitude;
             dir.Normalize();
-            Vector3 upArc = Vector3.up * Mathf.Min(6f, dist * 0.28f);   // 抛物线上抬分量
+            Vector3 vel;
+            if (kind != "corral" && dist < 12f)
+            {
+                // 市场近距离：投入口在高处，抛物线弹道难以命中（实测掉在口边地上）。
+                // 改为物品从投入口正上方落下、给向下初速，必定穿过结算碰撞体——
+                // 画面效果=物品从上方掉进投入口。
+                origin = target + Vector3.up * 1.2f;
+                vel = Vector3.down * 3f;
+            }
+            else
+            {
+                Vector3 upArc = Vector3.up * Mathf.Min(6f, dist * 0.28f);   // 抛物线上抬分量
+                vel = (dir * 14f) + upArc;
+            }
             GameObject inst = RunOnMain(() =>
             {
                 var go = UnityEngine.Object.Instantiate(prefab, origin, Quaternion.LookRotation(dir));
                 var rb = go.GetComponent<Rigidbody>();
                 if (rb != null)
                 {
-                    rb.velocity = (dir * 14f) + upArc;   // ~弹速
+                    rb.velocity = vel;
                 }
                 return go;
             });
