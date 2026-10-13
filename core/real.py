@@ -536,10 +536,10 @@ class WalkCaptureIO:
                 "note": "投进市场后资金没有增加，这次不算卖出"}
 
     def grab_here(self, kind: str) -> Dict[str, Any]:
-        """瞬移到食物或结晶旁边，再吸附。不走路。
+        """瞬移到物品旁、镜头真实对准（画面可见），吸取走游戏原生路径。
 
-        成败判定用 mod 权威复核（吸附后目标从世界消失=吸到）：帧差视觉判定在本机
-        DPI 虚拟化下抓图错位，吸没吸到都会误判成"画面没有变化"。
+        SR1 光标锁定态对注入的鼠标按键无响应（键盘/移动/菜单点击均通，唯独按住
+        左键吸/投无效，系统级按键状态已确认按下）——吸取改 Vacuumable.TryConsume。
         """
         self._dismiss_if_paused()
         label = "食物" if kind == "food" else "结晶"
@@ -548,26 +548,27 @@ class WalkCaptureIO:
             return tp
         time.sleep(0.45)
         scanner = self.io.scan_food if kind == "food" else self.io.scan_plort
-        for attempt in range(2):
-            self._dismiss_if_paused()          # 吸附窗口可能正好被 NEKO 说话触发暂停
-            target = scanner()
-            if not target.get("ok"):
-                return {"ok": False, "note": target.get("note", "附近没有%s" % label)}
-            d0 = float(target.get("dist", 1e9))
+        self._dismiss_if_paused()
+        target = scanner()
+        if target.get("ok"):
             self._turn_toward(target, rescanner=scanner, max_steps=12)
-            self._pitch_toward(scanner)        # 瞬移只改身体朝向，镜头要用鼠标真实转过去
-            vac = self._vacuum(0.9)
-            if vac.get("aborted"):
-                return vac
-            after = scanner()
-            if (not after.get("ok")) or float(after.get("dist", 1e9)) > d0 + 8:
-                return {"ok": True, "note": "已瞬移到%s旁边并吸起%s" % (
-                    label, "" if attempt == 0 else "（重试成功）")}
-            time.sleep(0.4)
-        return {"ok": False, "note": "%s，但吸附后目标仍在原地（可能未吸中）" % tp.get("note", "")}
+            self._pitch_toward(scanner)          # 镜头真实对准目标（画面可见）再吸
+        if hasattr(self.io, "vac_grab"):
+            res = self.io.vac_grab(kind)
+            if res.get("ok"):
+                return {"ok": True, "note": "%s，镜头对准后已吸取（原生路径）" % tp.get("note", "")}
+            return {"ok": False, "note": "%s。%s" % (tp.get("note", ""), res.get("note", ""))}
+        # 老版本 mod：退回鼠标吸附
+        vac = self._vacuum(0.9)
+        if vac.get("aborted"):
+            return vac
+        after = scanner()
+        if (not after.get("ok")) or float(after.get("dist", 1e9)) > float(target.get("dist", 0)) + 8:
+            return {"ok": True, "note": "已瞬移到%s旁边并吸起" % label}
+        return {"ok": False, "note": "%s，但吸附后目标仍在原地" % tp.get("note", "")}
 
     def feed_here(self) -> Dict[str, Any]:
-        """瞬移到围栏前，做出投喂，并尝试把食物放进喂食器。"""
+        """瞬移到围栏前、镜头真实对准（画面可见），食物以真实物理投进围栏。"""
         self._dismiss_if_paused()
         tp = self.io.tp_plot("corral") if hasattr(self.io, "tp_plot") else {"ok": False, "note": "无法瞬移到围栏"}
         if not tp.get("ok"):
@@ -580,24 +581,57 @@ class WalkCaptureIO:
             if target.get("ok"):
                 self._turn_toward(target, rescanner=self.io.scan_corral, max_steps=12)
                 self._pitch_toward(self.io.scan_corral)   # 镜头真实对准围栏再投
-            try:
-                center = self._center()
-                if center:
-                    win.mouse_click(center[0], center[1])
-                    time.sleep(0.25)
-                    win.mouse_click(center[0], center[1])
-            except Exception:
-                pass
+        thrown = {"ok": False, "note": ""}
+        if hasattr(self.io, "vac_launch"):
+            thrown = self.io.vac_launch("corral")
         magic = self.io.feed_show() if hasattr(self.io, "feed_show") else {"ok": False, "note": ""}
-        return {"ok": True, "note": "%s。%s" % (tp.get("note", "已到围栏前"), magic.get("note", ""))}
+        notes = tp.get("note", "已到围栏前")
+        if thrown.get("ok"):
+            notes += "。" + thrown.get("note", "")
+        if magic.get("note"):
+            notes += "。" + magic.get("note", "")
+        return {"ok": bool(thrown.get("ok") or magic.get("ok")),
+                "note": notes}
 
     def sell_here(self) -> Dict[str, Any]:
-        """瞬移到结晶市场前再投掷，不走路。"""
+        """瞬移到结晶市场前，台账背包里的结晶以真实物理投进投入口（原生结算入账）。"""
+        self._dismiss_if_paused()
         tp = self.io.tp_market() if hasattr(self.io, "tp_market") else {"ok": False, "note": "无法瞬移到市场"}
         if not tp.get("ok"):
             return {"ok": False, "gains": 0, "note": tp.get("note", "")}
         time.sleep(0.45)
-        return self._throw_into_market()
+        win = self._load()
+        if win not in (None, False):
+            self._dismiss_if_paused()
+            if not self._turn_toward(self._scan_port_close(), rescanner=self._scan_port_close, max_steps=8):
+                pass  # 对准失败也继续：投掷走物理计算，不依赖准星
+        try:
+            before = int(self.io.read_money())
+        except Exception:
+            before = -1
+        thrown = 0
+        last_note = ""
+        if hasattr(self.io, "vac_launch"):
+            for _ in range(8):
+                res = self.io.vac_launch("market")
+                if not res.get("ok"):
+                    last_note = res.get("note", "")
+                    break
+                thrown += 1
+                time.sleep(0.8)
+            time.sleep(2.0)   # 等飞行物进市场口结算
+        else:
+            return self._throw_into_market()
+        try:
+            after = int(self.io.read_money())
+        except Exception:
+            after = -1
+        gains = max(0, after - before) if before >= 0 and after >= 0 else 0
+        if gains > 0:
+            return {"ok": True, "gains": gains,
+                    "note": f"已瞬移到市场投出 {thrown} 件结晶（真实物理），收入 ${gains}，当前 ${after}"}
+        return {"ok": False, "gains": 0,
+                "note": f"投出 {thrown} 件后资金没有增加{('（' + last_note + '）') if last_note else ''}"}
 
     def _throw_into_market(self, throws: int = 6) -> Dict[str, Any]:
         win = self._load()

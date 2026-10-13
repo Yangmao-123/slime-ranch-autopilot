@@ -553,6 +553,8 @@ namespace SlimeBridge
                             case "feed_show": FeedShowReal(ar); break;
                             case "debug_types": DebugTypesReal(kind, ar); break;
                             case "debug_cams": DebugCamsReal(ar); break;
+                            case "vac_grab": VacGrabReal(kind, ar); break;
+                            case "vac_launch": VacLaunchReal(kind, ar); break;
                             case "debug_market": DebugMarketReal(ar); break;
                             case "probe": ProbeNearReal(ar, kind); break;
                             case "continue": ContinueSaveReal(ar); break;
@@ -1863,6 +1865,156 @@ namespace SlimeBridge
                 ar.note = sb.ToString();
             }
             catch (Exception e) { ar.ok = false; ar.note = "debug_cams 异常: " + e.Message; }
+        }
+
+        // ---- 真空吸取/投掷（游戏原生路径）----
+        // 背景：SR1 在光标锁定态对注入的鼠标按键无响应（键盘/移动/菜单点击都通，
+        // 唯独按住左键吸/投无效，系统级按键状态确认已按下）。吸取改走
+        // Vacuumable.TryConsume()（真空枪吸入的内部路径），投掷=从枪口生成物品
+        // 以真实物理飞向目标（进市场口触发原生结算、落进围栏被史莱姆真吃）。
+        // 台账 _bag 记录吸到的物品（游戏 ammo 模型 API 过深，自主循环内自洽即可）。
+        private readonly Dictionary<Identifiable.Id, int> _bag = new Dictionary<Identifiable.Id, int>();
+
+        private Identifiable FindNearestVacuumable(bool food, float radius, out Vacuumable vac)
+        {
+            vac = null;
+            try
+            {
+                EnsureScene();
+                if (_player == null) return null;
+                Vector3 p = _player.transform.position;
+                Identifiable best = null; float bestD = radius;
+                foreach (var idf in UnityEngine.Object.FindObjectsOfType<Identifiable>())
+                {
+                    if (idf == null || idf.gameObject == null) continue;
+                    bool match = food ? IsFood(idf.id) : PLORT_IDS.Contains(idf.id);
+                    if (!match) continue;
+                    float d = Vector3.Distance(p, idf.transform.position);
+                    if (d < bestD)
+                    {
+                        var v = idf.GetComponent<Vacuumable>();
+                        if (v == null) continue;
+                        bestD = d; best = idf; vac = v;
+                    }
+                }
+                return best;
+            }
+            catch (Exception) { return null; }
+        }
+
+        private void VacGrabReal(string kind, ActionResult ar)
+        {
+            bool food = kind != "plort";
+            Vacuumable vac;
+            Identifiable idf = FindNearestVacuumable(food, 9f, out vac);
+            if (idf == null || vac == null)
+            {
+                ar.ok = false; ar.note = "附近没有可吸取的" + (food ? "食物" : "结晶");
+                return;
+            }
+            Identifiable.Id id = idf.id;
+            bool consumed = RunOnMain(() => vac.TryConsume());
+            if (!consumed)
+            {
+                ar.ok = false; ar.note = "TryConsume 返回 false（物品不可吸？）";
+                return;
+            }
+            _bag[id] = (_bag.ContainsKey(id) ? _bag[id] : 0) + 1;
+            ar.ok = true;
+            ar.count = 1;
+            ar.caught = id.ToString();
+            ar.note = "已真实吸取 " + id + "（真空枪原生路径），台账 " + id + " x" + _bag[id];
+        }
+
+        private void VacLaunchReal(string kind, ActionResult ar)
+        {
+            EnsureScene();
+            if (_player == null) { ar.ok = false; ar.note = "未进入存档"; return; }
+            if (_bag.Count == 0)
+            {
+                foreach (var kv in _bag) { }
+                ar.ok = false; ar.note = "台账背包是空的，没有可投掷的物品";
+                return;
+            }
+            // 取一个物品
+            Identifiable.Id id = Identifiable.Id.NONE; int cnt = 0;
+            foreach (var kv in _bag) { id = kv.Key; cnt = kv.Value; break; }
+            // 目标：market=投入口(抬高开孔)；corral=最近围栏中心上方
+            Vector3 target;
+            if (kind == "corral")
+            {
+                LandPlot plot = FindPlotOfKind("corral");
+                if (plot == null) { ar.ok = false; ar.note = "没有围栏可投"; return; }
+                target = plot.transform.position + Vector3.up * 0.6f;
+            }
+            else
+            {
+                if (_cachedMarket == null && !_marketFailed)
+                {
+                    _cachedMarket = FindMarketPos();
+                    if (_cachedMarket == null) _marketFailed = true;
+                }
+                if (_cachedMarket == null) { ar.ok = false; ar.note = "找不到结晶市场"; return; }
+                target = _cachedMarket.Value;
+            }
+            // 发射口：玩家真空枪的 vacOrigin（无则胸口前 0.5m）
+            Vector3 origin = _player.transform.position + _player.transform.forward * 0.6f + Vector3.up * 0.4f;
+            try
+            {
+                var wv = UnityEngine.Object.FindObjectsOfType<WeaponVacuum>();
+                if (wv != null && wv.Length > 0 && wv[0].vacOrigin != null)
+                    origin = wv[0].vacOrigin.transform.position;
+            }
+            catch (Exception) { }
+            GameObject prefab = null;
+            try
+            {
+                var gc = GameContext.Instance;
+                if (gc != null && gc.LookupDirector != null)
+                    prefab = gc.LookupDirector.GetPrefab(id);
+            }
+            catch (Exception e) { UMFLog.Log("[SlimeBridge] GetPrefab err: " + e.Message); }
+            if (prefab == null)
+            {
+                // 兜底：找场景里同 id 物件复制
+                try
+                {
+                    foreach (var idf in UnityEngine.Object.FindObjectsOfType<Identifiable>())
+                    {
+                        if (idf != null && idf.id == id && idf.gameObject != null)
+                        {
+                            prefab = idf.gameObject;
+                            break;
+                        }
+                    }
+                    if (prefab != null)
+                        prefab = RunOnMain(() => UnityEngine.Object.Instantiate(prefab));
+                }
+                catch (Exception) { prefab = null; }
+            }
+            if (prefab == null) { ar.ok = false; ar.note = "找不到 " + id + " 的 prefab"; return; }
+            Vector3 dir = (target - origin);
+            float dist = dir.magnitude;
+            dir.Normalize();
+            Vector3 upArc = Vector3.up * Mathf.Min(6f, dist * 0.28f);   // 抛物线上抬分量
+            GameObject inst = RunOnMain(() =>
+            {
+                var go = UnityEngine.Object.Instantiate(prefab, origin, Quaternion.LookRotation(dir));
+                var rb = go.GetComponent<Rigidbody>();
+                if (rb != null)
+                {
+                    rb.velocity = (dir * 14f) + upArc;   // ~弹速
+                }
+                return go;
+            });
+            if (inst == null) { ar.ok = false; ar.note = "生成投掷物失败"; return; }
+            // 台账扣减
+            _bag[id] = cnt - 1;
+            if (_bag[id] <= 0) _bag.Remove(id);
+            ar.ok = true;
+            ar.caught = id.ToString();
+            ar.note = "已从枪口投出 " + id + " 飞向" + (kind == "corral" ? "围栏" : "结晶市场")
+                      + "（真实物理），台账余 " + _bag.Count + " 种";
         }
 
         // ---- 状态汇总（整体投放到 Unity 主线程读取）----

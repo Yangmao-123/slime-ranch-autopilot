@@ -277,6 +277,19 @@ class BridgeIOController:
     def scan_food(self) -> Dict[str, Any]:
         return self._scan_aim("scan_food", "附近没有食物")
 
+    # ---------------- 原生吸取/投掷 ----------------
+    def vac_grab(self, kind: str) -> Dict[str, Any]:
+        """真空枪原生路径吸取 9m 内最近的食物/结晶（Vacuumable.TryConsume）。"""
+        res = self._post_action("vac_grab", kind)
+        return {"ok": bool(res.get("ok")), "note": res.get("note", ""),
+                "id": res.get("caught", "")}
+
+    def vac_launch(self, target: str) -> Dict[str, Any]:
+        """从枪口把台账背包里的物品以真实物理投向 target(market|corral)。"""
+        res = self._post_action("vac_launch", target)
+        return {"ok": bool(res.get("ok")), "note": res.get("note", ""),
+                "id": res.get("caught", "")}
+
     def scan_plort(self) -> Dict[str, Any]:
         return self._scan_aim("scan_plort", "附近没有结晶")
 
