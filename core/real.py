@@ -537,31 +537,38 @@ class WalkCaptureIO:
 
     def grab_here(self, kind: str) -> Dict[str, Any]:
         """瞬移到食物或结晶旁边，再吸附。不走路。"""
+        self._dismiss_if_paused()
         label = "食物" if kind == "food" else "结晶"
         tp = self.io.tp_item(kind) if hasattr(self.io, "tp_item") else {"ok": False, "note": "无法瞬移"}
         if not tp.get("ok"):
             return tp
         time.sleep(0.45)
         scanner = self.io.scan_food if kind == "food" else self.io.scan_plort
-        target = scanner()
-        if target.get("ok"):
-            self._turn_toward(target, rescanner=scanner, max_steps=12)
-            self._pitch_toward(scanner)          # 瞬移只改身体朝向，镜头要用鼠标真实转过去
-        vac = self._vacuum(0.9)
-        if vac.get("aborted"):
-            return vac
-        if not vac.get("visual"):
-            return {"ok": False, "note": "%s，但吸附后画面没有变化" % tp.get("note", "")}
-        return {"ok": True, "note": "已瞬移到%s旁边并吸起" % label}
+        for attempt in range(2):
+            self._dismiss_if_paused()          # 吸附窗口可能正好被 NEKO 说话触发暂停
+            target = scanner()
+            if target.get("ok"):
+                self._turn_toward(target, rescanner=scanner, max_steps=12)
+                self._pitch_toward(scanner)    # 瞬移只改身体朝向，镜头要用鼠标真实转过去
+            vac = self._vacuum(0.9)
+            if vac.get("aborted"):
+                return vac
+            if vac.get("visual"):
+                return {"ok": True, "note": "已瞬移到%s旁边并吸起%s" % (
+                    label, "" if attempt == 0 else "（重试成功）")}
+            time.sleep(0.4)
+        return {"ok": False, "note": "%s，但吸附后画面没有变化" % tp.get("note", "")}
 
     def feed_here(self) -> Dict[str, Any]:
         """瞬移到围栏前，做出投喂，并尝试把食物放进喂食器。"""
+        self._dismiss_if_paused()
         tp = self.io.tp_plot("corral") if hasattr(self.io, "tp_plot") else {"ok": False, "note": "无法瞬移到围栏"}
         if not tp.get("ok"):
             return tp
         time.sleep(0.45)
         win = self._load()
         if win not in (None, False):
+            self._dismiss_if_paused()
             target = self.io.scan_corral() if hasattr(self.io, "scan_corral") else {"ok": False}
             if target.get("ok"):
                 self._turn_toward(target, rescanner=self.io.scan_corral, max_steps=12)
@@ -569,6 +576,8 @@ class WalkCaptureIO:
             try:
                 center = self._center()
                 if center:
+                    win.mouse_click(center[0], center[1])
+                    time.sleep(0.25)
                     win.mouse_click(center[0], center[1])
             except Exception:
                 pass

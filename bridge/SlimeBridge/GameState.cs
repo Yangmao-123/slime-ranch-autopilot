@@ -551,6 +551,7 @@ namespace SlimeBridge
                             case "tp_plot": TeleportPlotReal(kind, ar); break;
                             case "tp_item": TeleportItemReal(kind, ar); break;
                             case "feed_show": FeedShowReal(ar); break;
+                            case "debug_types": DebugTypesReal(kind, ar); break;
                             case "debug_market": DebugMarketReal(ar); break;
                             case "probe": ProbeNearReal(ar, kind); break;
                             case "continue": ContinueSaveReal(ar); break;
@@ -919,17 +920,25 @@ namespace SlimeBridge
         }
 
         // 相机→目标 的俯仰角差(度，正=需抬头)，写入 ar.pitchDelta。
+        // 起点必须用**相机位置**(≈脚底+眼高)：desired 与 current 同以相机为基准，
+        // 否则 1.5m 眼高差在 4m 距离上就是 20° 的系统偏差，俯仰闭环永远对不准。
         private void SetPitchDelta(ActionResult ar, Vector3 target)
         {
             try
             {
-                Vector3 p = _player.transform.position;
-                Vector3 toT = target - p;
+                Vector3 origin = _player.transform.position;
+                Vector3 aimF = AimForward();
+                try
+                {
+                    var cam = Camera.main;
+                    if (cam != null && cam.transform != null) origin = cam.transform.position;
+                }
+                catch (Exception) { }
+                Vector3 toT = target - origin;
                 float flatLen = new Vector3(toT.x, 0f, toT.z).magnitude;
                 if (flatLen < 0.001f || toT.magnitude < 0.001f) return;
                 float desired = Mathf.Atan2(toT.y, flatLen) * Mathf.Rad2Deg;
-                Vector3 f = AimForward();
-                float current = Mathf.Asin(Mathf.Clamp(f.y, -1f, 1f)) * Mathf.Rad2Deg;
+                float current = Mathf.Asin(Mathf.Clamp(aimF.y, -1f, 1f)) * Mathf.Rad2Deg;
                 ar.pitchDelta = desired - current;
             }
             catch (Exception) { }
@@ -1753,6 +1762,57 @@ namespace SlimeBridge
                 ? "已升级 " + kind + "（" + up + "），花费约 $" + cost + "，当前资金 $" + ReadMoneyReal() + "（真实）"
                 : "升级失败（已升满？），已退回资金 " + cost;
             if (!ok) AddCurrencyReal(cost);
+        }
+
+        // ---- 类型内省（诊断：无人机/小工具 API 侦察）----
+        // 枚举 Assembly-CSharp 中名字含关键字的类型，dump 字段/方法签名 + 场景中现存实例。
+        // kind 传关键字（空=Drone）。用于实机摸清 DroneGadget/DroneProgram/GadgetDirector
+        // 的真实结构，再写 drone_setup。
+        private void DebugTypesReal(string kind, ActionResult ar)
+        {
+            try
+            {
+                string kw = string.IsNullOrEmpty(kind) ? "Drone" : kind;
+                var sb = new System.Text.StringBuilder();
+                var asm = typeof(LandPlot).Assembly;
+                var flags = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Static;
+                int tn = 0;
+                foreach (var t in asm.GetTypes())
+                {
+                    if (t == null || t.Name.IndexOf(kw, StringComparison.OrdinalIgnoreCase) < 0) continue;
+                    if (t.Name.IndexOf("<", StringComparison.Ordinal) >= 0) continue; // 跳过编译器生成
+                    if (++tn > 12) { sb.Append("...more\n"); break; }
+                    sb.Append("TYPE ").Append(t.FullName).Append("\n");
+                    int mn = 0;
+                    foreach (var f in t.GetFields(flags))
+                    {
+                        if (++mn > 10) { sb.Append("  ...\n"); break; }
+                        sb.Append("  F ").Append(f.FieldType.Name).Append(" ").Append(f.Name).Append("\n");
+                    }
+                    foreach (var m in t.GetMethods(flags))
+                    {
+                        if (m.IsSpecialName) continue;
+                        if (++mn > 24) { sb.Append("  ...\n"); break; }
+                        var ps = m.GetParameters();
+                        var pstr = new System.Text.StringBuilder();
+                        foreach (var p in ps) { if (pstr.Length > 0) pstr.Append(","); pstr.Append(p.ParameterType.Name); }
+                        sb.Append("  M ").Append(m.ReturnType.Name).Append(" ").Append(m.Name).Append("(").Append(pstr).Append(")\n");
+                    }
+                    // 场景中现存实例（若有）
+                    try
+                    {
+                        var inst = UnityEngine.Object.FindObjectsOfType(t);
+                        if (inst != null && inst.Length > 0)
+                            sb.Append("  LIVE x").Append(inst.Length)
+                              .Append(" pos0=").Append(((Component)inst[0]).transform.position.ToString("F1")).Append("\n");
+                    }
+                    catch (Exception) { }
+                }
+                sb.Append("types=").Append(tn);
+                ar.ok = true;
+                ar.note = sb.ToString();
+            }
+            catch (Exception e) { ar.ok = false; ar.note = "debug_types 异常: " + e.Message; }
         }
 
         // ---- 状态汇总（整体投放到 Unity 主线程读取）----
