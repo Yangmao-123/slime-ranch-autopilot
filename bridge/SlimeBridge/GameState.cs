@@ -555,6 +555,7 @@ namespace SlimeBridge
                             case "debug_cams": DebugCamsReal(ar); break;
                             case "vac_grab": VacGrabReal(kind, ar); break;
                             case "vac_launch": VacLaunchReal(kind, ar); break;
+                            case "slimes_home": SlimesHomeReal(ar); break;
                             case "debug_market": DebugMarketReal(ar); break;
                             case "probe": ProbeNearReal(ar, kind); break;
                             case "continue": ContinueSaveReal(ar); break;
@@ -2005,12 +2006,12 @@ namespace SlimeBridge
             float dist = dir.magnitude;
             dir.Normalize();
             Vector3 vel;
-            if (kind != "corral" && dist < 12f)
+            if (dist < 16f)
             {
-                // 市场近距离：投入口在高处，抛物线弹道难以命中（实测掉在口边地上）。
-                // 改为物品从投入口正上方落下、给向下初速，必定穿过结算碰撞体——
-                // 画面效果=物品从上方掉进投入口。
-                origin = target + Vector3.up * 1.2f;
+                // 近距离（市场投入口/围栏）抛物线弹道难以命中：市场掉口边地上、
+                // 围栏直接飞越围墙扔到栏外（实测）。改为从目标正上方落下——
+                // 市场=穿过结算碰撞体；围栏=落进栏内被史莱姆吃到。
+                origin = target + Vector3.up * (kind == "corral" ? 2.2f : 1.2f);
                 vel = Vector3.down * 3f;
             }
             else
@@ -2036,6 +2037,39 @@ namespace SlimeBridge
             ar.caught = id.ToString();
             ar.note = "已从枪口投出 " + id + " 飞向" + (kind == "corral" ? "围栏" : "结晶市场")
                       + "（真实物理），台账余 " + _bag.Count + " 种";
+        }
+
+        // ---- 史莱姆归栏（修复越狱）----
+        // 物理投喂曾把史莱姆挤出围栏（实测 4 只跑出 3 只）。把围栏 12m 内、不在栏内
+        // (距中心>4m) 的史莱姆搬回中心上方，让养殖回到正轨。
+        private void SlimesHomeReal(ActionResult ar)
+        {
+            EnsureScene();
+            if (_player == null) { ar.ok = false; ar.note = "未进入存档"; return; }
+            LandPlot plot = FindPlotOfKind("corral");
+            if (plot == null) { ar.ok = false; ar.note = "没有围栏"; return; }
+            Vector3 center = plot.transform.position;
+            int moved = 0;
+            try
+            {
+                foreach (var idf in UnityEngine.Object.FindObjectsOfType<Identifiable>())
+                {
+                    if (idf == null || idf.gameObject == null) continue;
+                    if (!SLIME_IDS.Contains(idf.id)) continue;
+                    Vector3 ip = idf.transform.position;
+                    Vector3 flat = new Vector3(ip.x - center.x, 0f, ip.z - center.z);
+                    if (flat.magnitude < 12f && flat.magnitude > 4f)
+                    {
+                        Vector3 dest = center + Vector3.up * 1.2f;
+                        RunOnMain(() => { idf.transform.position = dest; });
+                        moved++;
+                    }
+                }
+            }
+            catch (Exception e) { ar.ok = false; ar.note = "归栏异常: " + e.Message; return; }
+            ar.ok = true;
+            ar.count = moved;
+            ar.note = moved > 0 ? ("已把 " + moved + " 只越狱史莱姆搬回围栏") : "围栏外的史莱姆都在栏内，无需归栏";
         }
 
         // ---- 状态汇总（整体投放到 Unity 主线程读取）----
