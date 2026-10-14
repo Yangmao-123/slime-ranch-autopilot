@@ -2011,8 +2011,8 @@ namespace SlimeBridge
                 // 近距离（市场投入口/围栏）抛物线弹道难以命中：市场掉口边地上、
                 // 围栏直接飞越围墙扔到栏外（实测）。改为从目标正上方落下——
                 // 市场=穿过结算碰撞体；围栏=落进栏内被史莱姆吃到。
-                origin = target + Vector3.up * (kind == "corral" ? 2.2f : 1.2f);
-                vel = Vector3.down * 3f;
+                origin = target + Vector3.up * (kind == "corral" ? 2.2f : 0.3f);
+                vel = Vector3.down * 2f;
             }
             else
             {
