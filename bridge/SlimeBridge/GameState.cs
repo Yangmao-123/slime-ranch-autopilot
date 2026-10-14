@@ -1948,6 +1948,36 @@ namespace SlimeBridge
             // 取一个物品
             Identifiable.Id id = Identifiable.Id.NONE; int cnt = 0;
             foreach (var kv in _bag) { id = kv.Key; cnt = kv.Value; break; }
+            // 市场结算走游戏原生经济系统(EconomyDirector)：真实市价(含饱和度) + RegisterSold
+            if (kind != "corral")
+            {
+                int price = 0;
+                try
+                {
+                    var econ = UnityEngine.Object.FindObjectsOfType<EconomyDirector>();
+                    if (econ != null && econ.Length > 0)
+                    {
+                        float? v = econ[0].GetCurrValue(id);
+                        price = Mathf.RoundToInt(v ?? 0);
+                        econ[0].RegisterSold(id, 1);
+                    }
+                }
+                catch (Exception e) { UMFLog.Log("[SlimeBridge] econ err: " + e.Message); }
+                if (price <= 0)
+                {
+                    PLORT_PRICE.TryGetValue(id, out price);   // 兜底历史基础价
+                    if (price <= 0) price = 5;
+                }
+                AddCurrencyReal(price);
+                _bag[id] = cnt - 1;
+                if (_bag[id] <= 0) _bag.Remove(id);
+                ar.ok = true;
+                ar.gains = price;
+                ar.caught = id.ToString();
+                ar.note = "已把 " + id + " 售入结晶市场（原生经济结算，市价 $" + price
+                          + "），当前资金 $" + ReadMoneyReal() + "，台账余 " + _bag.Count + " 种";
+                return;
+            }
             // 目标：market=投入口(抬高开孔)；corral=最近围栏中心上方
             Vector3 target;
             if (kind == "corral")
