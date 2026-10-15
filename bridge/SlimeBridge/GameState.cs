@@ -1878,6 +1878,7 @@ namespace SlimeBridge
         // 以真实物理飞向目标（进市场口触发原生结算、落进围栏被史莱姆真吃）。
         // 台账 _bag 记录吸到的物品（游戏 ammo 模型 API 过深，自主循环内自洽即可）。
         private readonly Dictionary<Identifiable.Id, int> _bag = new Dictionary<Identifiable.Id, int>();
+        private Identifiable.Id _lastGrabbedId = Identifiable.Id.NONE;
 
         // 玩家真实物品栏(Ammo)：普通类(非UnityEngine.Object)，全反射获取。
         // GetAmmo(AmmoMode) 的枚举默认值不稳定（不同模式可能抛异常/返回null），
@@ -2023,6 +2024,7 @@ namespace SlimeBridge
                         object h = RunOnMain(() => AmmoCall(ammo, "GetCount", new object[] { id }));
                         int have = h is int ? (int)h : haveBefore + 1;
                         ar.ok = true; ar.count = 1; ar.caught = id.ToString();
+                        _lastGrabbedId = id;
                         ar.note = "已吸取 " + id + " 入真实物品栏(" + haveBefore + ">" + have + ")";
                         return;
                     }
@@ -2041,6 +2043,7 @@ namespace SlimeBridge
             ar.ok = true;
             ar.count = 1;
             ar.caught = id.ToString();
+            _lastGrabbedId = id;
             ar.note = "已吸取 " + id + "(物品栏满/不可用,入台账) 台账x" + _bag[id];
         }
 
@@ -2048,15 +2051,61 @@ namespace SlimeBridge
         {
             EnsureScene();
             if (_player == null) { ar.ok = false; ar.note = "未进入存档"; return; }
-            if (_bag.Count == 0)
+            // 取物优先级：真实物品栏(_lastGrabbedId / 按 kind 扫描) > 台账 _bag。
+            // (旧代码先查台账，物品栏有货但台账空时会误报"台账是空的"。)
+            object ammoPre = PlayerAmmo();
+            Identifiable.Id id = Identifiable.Id.NONE; int cnt = 0;
+            bool fromBag = false;
+            if (ammoPre != null)
             {
-                foreach (var kv in _bag) { }
-                ar.ok = false; ar.note = "台账背包是空的，没有可投掷的物品";
+                bool wantFood = (kind == "corral");
+                if (_lastGrabbedId != Identifiable.Id.NONE)
+                {
+                    object c = RunOnMain(() => AmmoCall(ammoPre, "GetCount", new object[] { _lastGrabbedId }));
+                    bool matches = wantFood ? IsFood(_lastGrabbedId) : PLORT_IDS.Contains(_lastGrabbedId);
+                    if (matches && c is int && (int)c > 0) id = _lastGrabbedId;
+                }
+                if (id == Identifiable.Id.NONE)
+                {
+                    object numObj = null;
+                    var tA = ammoPre.GetType();
+                    var flagsA = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
+                    foreach (var f in tA.GetFields(flagsA))
+                    {
+                        if (f.Name == "numSlots") { numObj = f.GetValue(ammoPre); break; }
+                    }
+                    int nSlots = numObj is int ? (int)numObj : 4;
+                    for (int si = 0; si < nSlots && id == Identifiable.Id.NONE; si++)
+                    {
+                        object nm = RunOnMain(() => AmmoCall(ammoPre, "GetSlotName", new object[] { si }));
+                        if (nm == null) continue;
+                        try
+                        {
+                            var sid = (Identifiable.Id)System.Enum.Parse(typeof(Identifiable.Id), nm.ToString(), false);
+                            bool matches = wantFood ? IsFood(sid) : PLORT_IDS.Contains(sid);
+                            if (!matches) continue;
+                            object c2 = RunOnMain(() => AmmoCall(ammoPre, "GetSlotCount", new object[] { si }));
+                            if (c2 is int && (int)c2 > 0) id = sid;
+                        }
+                        catch (Exception) { }
+                    }
+                }
+                if (id == Identifiable.Id.NONE)
+                {
+                    ar.ok = false; ar.note = "真实物品栏里没有可投掷的" + (kind == "corral" ? "食物" : "结晶");
+                    return;
+                }
+            }
+            else if (_bag.Count > 0)
+            {
+                foreach (var kv in _bag) { id = kv.Key; cnt = kv.Value; break; }
+                fromBag = true;
+            }
+            else
+            {
+                ar.ok = false; ar.note = "物品栏与台账都没有可投掷物品";
                 return;
             }
-            // 取一个物品
-            Identifiable.Id id = Identifiable.Id.NONE; int cnt = 0;
-            foreach (var kv in _bag) { id = kv.Key; cnt = kv.Value; break; }
             // 优先走真实物品栏(Ammo)：出现一个物品=消耗物品栏一个。
             object ammoL = PlayerAmmo();
             if (ammoL != null)
