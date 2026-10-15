@@ -1880,10 +1880,12 @@ namespace SlimeBridge
         private readonly Dictionary<Identifiable.Id, int> _bag = new Dictionary<Identifiable.Id, int>();
 
         // 玩家真实物品栏(Ammo)：普通类(非UnityEngine.Object)，全反射获取。
-        // 路径：PlayerState 的 GetAmmo(...) 需要参数（编译器证实），改反射枚举所有
-        // GetAmmo 重载尝试无参调用失败后再试带枚举默认值调用。
+        // GetAmmo(AmmoMode) 的枚举默认值不稳定（不同模式可能抛异常/返回null），
+        // 遍历所有枚举值取第一个成功的，并缓存命中实例。
+        private object _ammoCached;
         private object PlayerAmmo()
         {
+            if (_ammoCached != null) return _ammoCached;
             try
             {
                 if (_playerState != null)
@@ -1895,28 +1897,34 @@ namespace SlimeBridge
                     {
                         if (m.Name != "GetAmmo") continue;
                         var ps = m.GetParameters();
-                        try
+                        if (ps.Length != 1 || !ps[0].ParameterType.IsEnum) continue;
+                        var vals = System.Enum.GetValues(ps[0].ParameterType);
+                        foreach (var ev in vals)
                         {
-                            object[] args = new object[ps.Length];
-                            for (int i = 0; i < ps.Length; i++)
+                            try
                             {
-                                if (ps[i].ParameterType.IsEnum) args[i] = System.Activator.CreateInstance(ps[i].ParameterType);
-                                else if (ps[i].ParameterType.IsValueType) args[i] = System.Activator.CreateInstance(ps[i].ParameterType);
-                                else args[i] = null;
+                                var a = m.Invoke(_playerState, new object[] { ev });
+                                if (a != null)
+                                {
+                                    _ammoCached = a;
+                                    UMFLog.Log("[SlimeBridge] Ammo cached via GetAmmo(" + ev + ")");
+                                    return a;
+                                }
                             }
-                            var a = m.Invoke(_playerState, args);
-                            if (a != null) return a;
+                            catch (Exception) { }
                         }
-                        catch (Exception) { }
                     }
-                    // 属性/字段兜底
                     foreach (var prop in t.GetProperties(flags))
                     {
                         if (prop.Name.IndexOf("ammo", System.StringComparison.OrdinalIgnoreCase) >= 0
                             && prop.PropertyType.Name == "Ammo")
                         {
-                            var a = prop.GetValue(_playerState, null);
-                            if (a != null) return a;
+                            try
+                            {
+                                var a = prop.GetValue(_playerState, null);
+                                if (a != null) { _ammoCached = a; return a; }
+                            }
+                            catch (Exception) { }
                         }
                     }
                     foreach (var f in t.GetFields(flags))
@@ -1924,8 +1932,12 @@ namespace SlimeBridge
                         if (f.Name.IndexOf("ammo", System.StringComparison.OrdinalIgnoreCase) >= 0
                             && f.FieldType.Name == "Ammo")
                         {
-                            var a = f.GetValue(_playerState);
-                            if (a != null) return a;
+                            try
+                            {
+                                var a = f.GetValue(_playerState);
+                                if (a != null) { _ammoCached = a; return a; }
+                            }
+                            catch (Exception) { }
                         }
                     }
                 }
