@@ -2152,7 +2152,6 @@ namespace SlimeBridge
                 RunOnMain(() => AmmoCall(ammoL, "SetAmmoSlot", new object[] { slotIdx }));
                 // 原生发射 = 真实扣物品栏(DecrementSelectedAmmo) + 枪口正规 prefab 物理弹出。
                 // (ExpelAmmo 不在 Ammo/WeaponVacuum 的方法表上，无法直接调用。)
-                object dec = RunOnMain(() => AmmoCall(ammoL, "DecrementSelectedAmmo", new object[] { 1 }));
                 bool spawned = false;
                 try
                 {
@@ -2162,34 +2161,39 @@ namespace SlimeBridge
                         pf = RunOnMain(() => gc.LookupDirector.GetPrefab(id));
                     if (pf != null)
                     {
+                        // 原生发射：Instantiate 出物品后交给 WeaponVacuum.Expel(GameObject, ignoreEmotions)
+                        // ——它会做全套发射状态(速度/特效/Launch/layer)，与玩家手动发射完全一致。
                         Vector3 ejeOrigin = _player.transform.position + AimForward() * 0.7f + Vector3.up * 0.3f;
-                        try
-                        {
-                            var wv = UnityEngine.Object.FindObjectsOfType<WeaponVacuum>();
-                            if (wv != null && wv.Length > 0 && wv[0].vacOrigin != null)
-                                ejeOrigin = wv[0].vacOrigin.transform.position;
-                        }
-                        catch (Exception) { }
+                        var wv = UnityEngine.Object.FindObjectsOfType<WeaponVacuum>();
+                        if (wv != null && wv.Length > 0 && wv[0].vacOrigin != null)
+                            ejeOrigin = wv[0].vacOrigin.transform.position;
                         Vector3 ejeDir = AimForward();
-                        float spd = 14f;
-                        try
-                        {
-                            var wv2 = UnityEngine.Object.FindObjectsOfType<WeaponVacuum>();
-                            if (wv2 != null && wv2.Length > 0) spd = wv2[0].ejectSpeed;
-                        }
-                        catch (Exception) { }
-                        Vector3 ejeVel = ejeDir * spd + Vector3.up * 1.5f;
                         GameObject ejeInst = RunOnMain(() =>
+                            UnityEngine.Object.Instantiate(pf, ejeOrigin, Quaternion.LookRotation(ejeDir)));
+                        if (ejeInst != null && wv != null && wv.Length > 0)
                         {
-                            var go = UnityEngine.Object.Instantiate(pf, ejeOrigin, Quaternion.LookRotation(ejeDir));
-                            var rb = go.GetComponent<Rigidbody>();
-                            if (rb != null) rb.velocity = ejeVel;
-                            return go;
-                        });
-                        spawned = ejeInst != null;
+                            RunOnMain(() => wv[0].Expel(ejeInst, false));
+                            spawned = true;
+                        }
+                        else if (ejeInst != null)
+                        {
+                            // 无真空枪实例(异常情况)：退手搓物理
+                            float spd = 14f;
+                            Vector3 ejeVel = ejeDir * spd + Vector3.up * 1.5f;
+                            RunOnMain(() =>
+                            {
+                                var rb = ejeInst.GetComponent<Rigidbody>();
+                                if (rb != null) rb.velocity = ejeVel;
+                            });
+                            spawned = true;
+                        }
                     }
                 }
                 catch (Exception e) { UMFLog.Log("[SlimeBridge] eject err: " + e.Message); }
+                if (spawned)
+                {
+                    RunOnMain(() => AmmoCall(ammoL, "DecrementSelectedAmmo", new object[] { 1 }));
+                }
                 if (spawned)
                 {
                     ar.ok = true; ar.caught = id.ToString();
@@ -2198,7 +2202,7 @@ namespace SlimeBridge
                               + ",真实物理弹出) 飞向准星方向";
                     return;
                 }
-                ar.ok = false; ar.note = "发射失败(扣栏" + (dec != null ? "成功" : "失败") + ",生成失败)"; return;
+                ar.ok = false; ar.note = "发射失败(生成物品失败)"; return;
             }
             // Ammo 不可用：退回台账模式
             // 市场结算走游戏原生经济系统(EconomyDirector)：真实市价(含饱和度) + RegisterSold
