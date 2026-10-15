@@ -2101,36 +2101,55 @@ namespace SlimeBridge
                 catch (Exception e) { UMFLog.Log("[SlimeBridge] GetAmmoIdx err: " + e.Message); }
                 if (slotIdx < 0) { ar.ok = false; ar.note = "物品栏找不到 " + id + " 槽位"; return; }
                 RunOnMain(() => AmmoCall(ammoL, "SetAmmoSlot", new object[] { slotIdx }));
-                bool expelled = false;
+                // 原生发射 = 真实扣物品栏(DecrementSelectedAmmo) + 枪口正规 prefab 物理弹出。
+                // (ExpelAmmo 不在 Ammo/WeaponVacuum 的方法表上，无法直接调用。)
+                object dec = RunOnMain(() => AmmoCall(ammoL, "DecrementSelectedAmmo", new object[] { 1 }));
+                bool spawned = false;
                 try
                 {
-                    var wv = UnityEngine.Object.FindObjectsOfType<WeaponVacuum>();
-                    if (wv != null && wv.Length > 0)
+                    GameObject pf = null;
+                    var gc = GameContext.Instance;
+                    if (gc != null && gc.LookupDirector != null)
+                        pf = RunOnMain(() => gc.LookupDirector.GetPrefab(id));
+                    if (pf != null)
                     {
-                        // ExpelAmmo 不在 WeaponVacuum 上(编译器证实)：试 ammo 实例的方法
-                        object ex = RunOnMain(() => AmmoCall(ammoL, "ExpelAmmo", new object[0]));
-                        if (ex == null) ex = RunOnMain(() => AmmoCall(wv[0], "ExpelAmmo", new object[0]));
-                        expelled = ex != null || expelled;
-                        if (!expelled)
+                        Vector3 ejeOrigin = _player.transform.position + AimForward() * 0.7f + Vector3.up * 0.3f;
+                        try
                         {
-                            // 再试武器上的发射方法（名字探测）
-                            foreach (var name in new[] { "ExpelHeld", "ShootInternal", "Shoot" })
-                            {
-                                object r2 = RunOnMain(() => AmmoCall(wv[0], name, new object[0]));
-                                if (r2 != null) { expelled = true; break; }
-                            }
+                            var wv = UnityEngine.Object.FindObjectsOfType<WeaponVacuum>();
+                            if (wv != null && wv.Length > 0 && wv[0].vacOrigin != null)
+                                ejeOrigin = wv[0].vacOrigin.transform.position;
                         }
+                        catch (Exception) { }
+                        Vector3 ejeDir = AimForward();
+                        float spd = 14f;
+                        try
+                        {
+                            var wv2 = UnityEngine.Object.FindObjectsOfType<WeaponVacuum>();
+                            if (wv2 != null && wv2.Length > 0) spd = wv2[0].ejectSpeed;
+                        }
+                        catch (Exception) { }
+                        Vector3 ejeVel = ejeDir * spd + Vector3.up * 1.5f;
+                        GameObject ejeInst = RunOnMain(() =>
+                        {
+                            var go = UnityEngine.Object.Instantiate(pf, ejeOrigin, Quaternion.LookRotation(ejeDir));
+                            var rb = go.GetComponent<Rigidbody>();
+                            if (rb != null) rb.velocity = ejeVel;
+                            return go;
+                        });
+                        spawned = ejeInst != null;
                     }
                 }
-                catch (Exception e) { UMFLog.Log("[SlimeBridge] ExpelAmmo err: " + e.Message); }
-                if (expelled)
+                catch (Exception e) { UMFLog.Log("[SlimeBridge] eject err: " + e.Message); }
+                if (spawned)
                 {
                     ar.ok = true; ar.caught = id.ToString();
-                    ar.note = "已真空枪真实发射 " + id + "(原生ExpelAmmo,物品栏" + haveL + ">"
-                              + (RunOnMain(() => AmmoCall(ammoL, "GetCount", new object[] { id })) ?? "?") + ") 物品飞向准星";
+                    ar.note = "已从枪口发射 " + id + "(真实物品栏" + haveL + ">"
+                              + (RunOnMain(() => AmmoCall(ammoL, "GetCount", new object[] { id })) ?? "?")
+                              + ",真实物理弹出) 飞向准星方向";
                     return;
                 }
-                ar.ok = false; ar.note = "ExpelAmmo 调用失败"; return;
+                ar.ok = false; ar.note = "发射失败(扣栏" + (dec != null ? "成功" : "失败") + ",生成失败)"; return;
             }
             // Ammo 不可用：退回台账模式
             // 市场结算走游戏原生经济系统(EconomyDirector)：真实市价(含饱和度) + RegisterSold
