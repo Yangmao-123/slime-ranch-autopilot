@@ -553,6 +553,7 @@ namespace SlimeBridge
                             case "feed_show": FeedShowReal(ar); break;
                             case "debug_types": DebugTypesReal(kind, ar); break;
                             case "debug_cams": DebugCamsReal(ar); break;
+                            case "debug_members": DebugMembersReal(kind, ar); break;
                             case "vac_grab": VacGrabReal(kind, ar); break;
                             case "vac_launch": VacLaunchReal(kind, ar); break;
                             case "slimes_home": SlimesHomeReal(ar); break;
@@ -1876,6 +1877,82 @@ namespace SlimeBridge
         // 台账 _bag 记录吸到的物品（游戏 ammo 模型 API 过深，自主循环内自洽即可）。
         private readonly Dictionary<Identifiable.Id, int> _bag = new Dictionary<Identifiable.Id, int>();
 
+        // 玩家真实物品栏(Ammo)：普通类(非UnityEngine.Object)，全反射获取。
+        // 路径：PlayerState 的 GetAmmo(...) 需要参数（编译器证实），改反射枚举所有
+        // GetAmmo 重载尝试无参调用失败后再试带枚举默认值调用。
+        private object PlayerAmmo()
+        {
+            try
+            {
+                if (_playerState != null)
+                {
+                    var t = _playerState.GetType();
+                    var flags = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
+                        | System.Reflection.BindingFlags.Instance;
+                    foreach (var m in t.GetMethods(flags))
+                    {
+                        if (m.Name != "GetAmmo") continue;
+                        var ps = m.GetParameters();
+                        try
+                        {
+                            object[] args = new object[ps.Length];
+                            for (int i = 0; i < ps.Length; i++)
+                            {
+                                if (ps[i].ParameterType.IsEnum) args[i] = System.Activator.CreateInstance(ps[i].ParameterType);
+                                else if (ps[i].ParameterType.IsValueType) args[i] = System.Activator.CreateInstance(ps[i].ParameterType);
+                                else args[i] = null;
+                            }
+                            var a = m.Invoke(_playerState, args);
+                            if (a != null) return a;
+                        }
+                        catch (Exception) { }
+                    }
+                    // 属性/字段兜底
+                    foreach (var prop in t.GetProperties(flags))
+                    {
+                        if (prop.Name.IndexOf("ammo", System.StringComparison.OrdinalIgnoreCase) >= 0
+                            && prop.PropertyType.Name == "Ammo")
+                        {
+                            var a = prop.GetValue(_playerState, null);
+                            if (a != null) return a;
+                        }
+                    }
+                    foreach (var f in t.GetFields(flags))
+                    {
+                        if (f.Name.IndexOf("ammo", System.StringComparison.OrdinalIgnoreCase) >= 0
+                            && f.FieldType.Name == "Ammo")
+                        {
+                            var a = f.GetValue(_playerState);
+                            if (a != null) return a;
+                        }
+                    }
+                }
+            }
+            catch (Exception) { }
+            return null;
+        }
+
+        // 反射调用 ammo 实例的成员（方法或属性），返回 null=失败
+        private object AmmoCall(object ammo, string member, object[] args)
+        {
+            if (ammo == null) return null;
+            var flags = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
+                | System.Reflection.BindingFlags.Instance;
+            var t = ammo.GetType();
+            try
+            {
+                foreach (var m in t.GetMethods(flags))
+                {
+                    if (m.Name != member) continue;
+                    var ps = m.GetParameters();
+                    if (ps.Length != (args == null ? 0 : args.Length)) continue;
+                    return m.Invoke(ammo, args);
+                }
+            }
+            catch (Exception) { }
+            return null;
+        }
+
         private Identifiable FindNearestVacuumable(bool food, float radius, out Vacuumable vac)
         {
             vac = null;
@@ -1914,25 +1991,48 @@ namespace SlimeBridge
                 return;
             }
             Identifiable.Id id = idf.id;
-            bool consumed = false;
-            string how = "真空枪原生路径";
-            try { consumed = RunOnMain(() => vac.TryConsume()); }
-            catch (Exception e)
+            // 优先入真实物品栏(Ammo.MaybeAddToSlot)：满了才不入。
+            object ammo = PlayerAmmo();
+            int haveBefore = 0;
+            if (ammo != null)
             {
-                UMFLog.Log("[SlimeBridge] TryConsume err: " + e.Message);
-                consumed = false;
+                try
+                {
+                    object hb = RunOnMain(() => AmmoCall(ammo, "GetCount", new object[] { id }));
+                    haveBefore = hb is int ? (int)hb : 0;
+                    object addedObj = RunOnMain(() => AmmoCall(ammo, "MaybeAddToSlot", new object[] { id, null }));
+                    bool ammoOk = addedObj is bool && (bool)addedObj;
+                    if (!ammoOk)
+                    {
+                        addedObj = RunOnMain(() => AmmoCall(ammo, "MaybeAddToSlot", new object[] { id }));
+                        ammoOk = addedObj is bool && (bool)addedObj;
+                    }
+                    if (ammoOk)
+                    {
+                        try { RunOnMain(() => vac.TryConsume()); }
+                        catch (Exception) { try { RunOnMain(() => UnityEngine.Object.Destroy(idf.gameObject)); } catch (Exception) { } }
+                        object h = RunOnMain(() => AmmoCall(ammo, "GetCount", new object[] { id }));
+                        int have = h is int ? (int)h : haveBefore + 1;
+                        ar.ok = true; ar.count = 1; ar.caught = id.ToString();
+                        ar.note = "已吸取 " + id + " 入真实物品栏(" + haveBefore + ">" + have + ")";
+                        return;
+                    }
+                }
+                catch (Exception e) { UMFLog.Log("[SlimeBridge] MaybeAddToSlot err: " + e.Message); }
             }
-            if (!consumed)
+            // 物品栏不可用/已满：退台账模式
+            bool consumed2 = false;
+            try { consumed2 = RunOnMain(() => vac.TryConsume()); }
+            catch (Exception) { consumed2 = false; }
+            if (!consumed2)
             {
-                // TryConsume 抛异常/拒收时兜底：销毁物品（视觉=被吸走），同样入台账
                 try { RunOnMain(() => UnityEngine.Object.Destroy(idf.gameObject)); } catch (Exception) { }
-                how = "原生路径异常，改直接移除入账";
             }
             _bag[id] = (_bag.ContainsKey(id) ? _bag[id] : 0) + 1;
             ar.ok = true;
             ar.count = 1;
             ar.caught = id.ToString();
-            ar.note = "已吸取 " + id + "（" + how + "），台账 " + id + " x" + _bag[id];
+            ar.note = "已吸取 " + id + "(物品栏满/不可用,入台账) 台账x" + _bag[id];
         }
 
         private void VacLaunchReal(string kind, ActionResult ar)
@@ -1948,6 +2048,82 @@ namespace SlimeBridge
             // 取一个物品
             Identifiable.Id id = Identifiable.Id.NONE; int cnt = 0;
             foreach (var kv in _bag) { id = kv.Key; cnt = kv.Value; break; }
+            // 优先走真实物品栏(Ammo)：出现一个物品=消耗物品栏一个。
+            object ammoL = PlayerAmmo();
+            if (ammoL != null)
+            {
+                object hL = RunOnMain(() => AmmoCall(ammoL, "GetCount", new object[] { id }));
+                int haveL = hL is int ? (int)hL : 0;
+                if (haveL <= 0) { ar.ok = false; ar.note = "真实物品栏里没有 " + id; return; }
+                if (kind != "corral")
+                {
+                    int priceL = 0;
+                    try
+                    {
+                        var econ = UnityEngine.Object.FindObjectsOfType<EconomyDirector>();
+                        if (econ != null && econ.Length > 0)
+                        {
+                            float? v = econ[0].GetCurrValue(id);
+                            priceL = Mathf.RoundToInt(v ?? 0);
+                            econ[0].RegisterSold(id, 1);
+                        }
+                    }
+                    catch (Exception e) { UMFLog.Log("[SlimeBridge] econ err: " + e.Message); }
+                    if (priceL <= 0) { PLORT_PRICE.TryGetValue(id, out priceL); if (priceL <= 0) priceL = 5; }
+                    AddCurrencyReal(priceL);
+                    RunOnMain(() => AmmoCall(ammoL, "Decrement", new object[] { id }));
+                    ar.ok = true; ar.gains = priceL; ar.caught = id.ToString();
+                    ar.note = "已售 " + id + "(原生经济$" + priceL + ",物品栏" + haveL + ">"
+                              + (RunOnMain(() => AmmoCall(ammoL, "GetCount", new object[] { id })) ?? "?") + ") 资金$" + ReadMoneyReal();
+                    return;
+                }
+                // 围栏：原生 ExpelAmmo——选中槽位后真空枪真实发射(扣物品栏+枪口弹出+史莱姆可吃)
+                int slotIdx = -1;
+                try
+                {
+                    var idxObj = RunOnMain(() => AmmoCall(ammoL, "GetAmmoIdx", new object[] { id }));
+                    if (idxObj is int) slotIdx = (int)idxObj;
+                    else if (idxObj != null)
+                    {
+                        var hv = idxObj.GetType().GetMethod("GetValueOrDefault", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                        if (hv != null) { var v = hv.Invoke(idxObj, null); if (v is int) slotIdx = (int)v; }
+                    }
+                }
+                catch (Exception e) { UMFLog.Log("[SlimeBridge] GetAmmoIdx err: " + e.Message); }
+                if (slotIdx < 0) { ar.ok = false; ar.note = "物品栏找不到 " + id + " 槽位"; return; }
+                RunOnMain(() => AmmoCall(ammoL, "SetAmmoSlot", new object[] { slotIdx }));
+                bool expelled = false;
+                try
+                {
+                    var wv = UnityEngine.Object.FindObjectsOfType<WeaponVacuum>();
+                    if (wv != null && wv.Length > 0)
+                    {
+                        // ExpelAmmo 不在 WeaponVacuum 上(编译器证实)：试 ammo 实例的方法
+                        object ex = RunOnMain(() => AmmoCall(ammoL, "ExpelAmmo", new object[0]));
+                        if (ex == null) ex = RunOnMain(() => AmmoCall(wv[0], "ExpelAmmo", new object[0]));
+                        expelled = ex != null || expelled;
+                        if (!expelled)
+                        {
+                            // 再试武器上的发射方法（名字探测）
+                            foreach (var name in new[] { "ExpelHeld", "ShootInternal", "Shoot" })
+                            {
+                                object r2 = RunOnMain(() => AmmoCall(wv[0], name, new object[0]));
+                                if (r2 != null) { expelled = true; break; }
+                            }
+                        }
+                    }
+                }
+                catch (Exception e) { UMFLog.Log("[SlimeBridge] ExpelAmmo err: " + e.Message); }
+                if (expelled)
+                {
+                    ar.ok = true; ar.caught = id.ToString();
+                    ar.note = "已真空枪真实发射 " + id + "(原生ExpelAmmo,物品栏" + haveL + ">"
+                              + (RunOnMain(() => AmmoCall(ammoL, "GetCount", new object[] { id })) ?? "?") + ") 物品飞向准星";
+                    return;
+                }
+                ar.ok = false; ar.note = "ExpelAmmo 调用失败"; return;
+            }
+            // Ammo 不可用：退回台账模式
             // 市场结算走游戏原生经济系统(EconomyDirector)：真实市价(含饱和度) + RegisterSold
             if (kind != "corral")
             {
@@ -2100,6 +2276,83 @@ namespace SlimeBridge
             ar.ok = true;
             ar.count = moved;
             ar.note = moved > 0 ? ("已把 " + moved + " 只越狱史莱姆搬回围栏") : "围栏外的史莱姆都在栏内，无需归栏";
+        }
+
+        // ---- 精确成员签名 dump（诊断）----
+        private void DebugMembersReal(string kind, ActionResult ar)
+        {
+            try
+            {
+                var sb = new System.Text.StringBuilder();
+                var flags = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
+                    | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Static;
+                System.Type[] targets =
+                {
+                    typeof(Ammo), typeof(WeaponVacuum), typeof(PlayerState), typeof(Vacuumable)
+                };
+                foreach (var t in targets)
+                {
+                    sb.Append("== ").Append(t.Name).Append(" ==\n");
+                    foreach (var m in t.GetMethods(flags))
+                    {
+                        string n = m.Name;
+                        if (n.IndexOf("Memberwise", StringComparison.Ordinal) >= 0) continue;
+                        if (n.IndexOf("GetComp", StringComparison.Ordinal) >= 0) continue;
+                        if (n.IndexOf("Invoke", StringComparison.Ordinal) >= 0 && n.IndexOf("On") != 0) continue;
+                        if (System.Char.IsLower(n[0]) == false && n.Length > 2 && n[0] == n.ToUpper()[0]) { }
+                        var ps = m.GetParameters();
+                        var pstr = new System.Text.StringBuilder();
+                        foreach (var pp in ps) { if (pstr.Length > 0) pstr.Append(","); pstr.Append(pp.ParameterType.Name).Append(" ").Append(pp.Name); }
+                        sb.Append("  M ").Append(m.ReturnType.Name).Append(" ").Append(n).Append("(").Append(pstr).Append(")\n");
+                    }
+                    foreach (var f in t.GetFields(flags))
+                        sb.Append("  F ").Append(f.FieldType.Name).Append(" ").Append(f.Name).Append("\n");
+                }
+                // 实例侧：PlayerState 里的 ammo 访问器 + WeaponVacuum 字段值
+                try
+                {
+                    var ps2 = _playerState;
+                    if (ps2 != null)
+                    {
+                        sb.Append("== PlayerState 实例字段找 ammo ==\n");
+                        foreach (var f in ps2.GetType().GetFields(flags))
+                        {
+                            string fn = f.Name.ToLowerInvariant();
+                            if (fn.IndexOf("ammo", StringComparison.Ordinal) >= 0 || fn.IndexOf("vac", StringComparison.Ordinal) >= 0)
+                            {
+                                object v = f.GetValue(ps2);
+                                sb.Append("  F ").Append(f.FieldType.Name).Append(" ").Append(f.Name)
+                                  .Append(" = ").Append(v != null ? v.GetType().Name : "null").Append("\n");
+                            }
+                        }
+                        foreach (var prop in ps2.GetType().GetProperties(flags))
+                        {
+                            string pn = prop.Name.ToLowerInvariant();
+                            if (pn.IndexOf("ammo", StringComparison.Ordinal) >= 0 || pn.IndexOf("vac", StringComparison.Ordinal) >= 0)
+                                sb.Append("  P ").Append(prop.PropertyType.Name).Append(" ").Append(prop.Name).Append("\n");
+                        }
+                    }
+                    var wv = UnityEngine.Object.FindObjectsOfType<WeaponVacuum>();
+                    if (wv != null && wv.Length > 0)
+                    {
+                        sb.Append("== WeaponVacuum 实例字段找 ammo ==\n");
+                        foreach (var f in wv[0].GetType().GetFields(flags))
+                        {
+                            string fn = f.Name.ToLowerInvariant();
+                            if (fn.IndexOf("ammo", StringComparison.Ordinal) >= 0)
+                            {
+                                object v = f.GetValue(wv[0]);
+                                sb.Append("  F ").Append(f.FieldType.Name).Append(" ").Append(f.Name)
+                                  .Append(" = ").Append(v != null ? v.GetType().Name : "null").Append("\n");
+                            }
+                        }
+                    }
+                }
+                catch (Exception e) { sb.Append("inst err: ").Append(e.Message).Append("\n"); }
+                ar.ok = true;
+                ar.note = sb.ToString();
+            }
+            catch (Exception e) { ar.ok = false; ar.note = "DebugMembers err: " + e.Message; }
         }
 
         // ---- 状态汇总（整体投放到 Unity 主线程读取）----
