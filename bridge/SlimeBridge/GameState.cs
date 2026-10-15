@@ -554,6 +554,7 @@ namespace SlimeBridge
                             case "debug_types": DebugTypesReal(kind, ar); break;
                             case "debug_cams": DebugCamsReal(ar); break;
                             case "debug_members": DebugMembersReal(kind, ar); break;
+                            case "save_now": SaveNowReal(ar); break;
                             case "vac_grab": VacGrabReal(kind, ar); break;
                             case "vac_launch": VacLaunchReal(kind, ar); break;
                             case "slimes_home": SlimesHomeReal(ar); break;
@@ -2276,6 +2277,26 @@ namespace SlimeBridge
             ar.ok = true;
             ar.count = moved;
             ar.note = moved > 0 ? ("已把 " + moved + " 只越狱史莱姆搬回围栏") : "围栏外的史莱姆都在栏内，无需归栏";
+        }
+
+        // ---- 主动保存（诊断/恢复存档写入）----
+        private void SaveNowReal(ActionResult ar)
+        {
+            try
+            {
+                var dir = UnityEngine.Object.FindObjectsOfType<AutoSaveDirector>();
+                if (dir == null || dir.Length == 0) { ar.ok = false; ar.note = "找不到 AutoSaveDirector"; return; }
+                bool ok = RunOnMain(() => dir[0].SaveAllNow());
+                ar.ok = ok;
+                ar.note = ok ? "SaveAllNow 已执行（保存成功）"
+                             : "SaveAllNow 返回 false";
+            }
+            catch (Exception e)
+            {
+                ar.ok = false;
+                ar.note = "保存异常: " + e.GetType().Name + " - " + e.Message;
+                try { UMFLog.Log("[SlimeBridge] SaveAllNow ex: " + e); } catch (Exception) { }
+            }
         }
 
         // ---- 精确成员签名 dump（诊断）----
