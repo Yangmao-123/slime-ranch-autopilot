@@ -213,7 +213,7 @@ namespace SlimeBridge
         // ---- 场景/缓存 ----
         private void EnsureScene()
         {
-            if (_scene != null) return;
+            if (_scene != null && _playerState != null && _player != null) return;
             _scene = SRSingleton<SceneContext>.Instance;
             if (_scene == null) return;
             try
@@ -555,6 +555,7 @@ namespace SlimeBridge
                             case "debug_cams": DebugCamsReal(ar); break;
                             case "debug_members": DebugMembersReal(kind, ar); break;
                             case "save_now": SaveNowReal(ar); break;
+                            case "ammo_probe": AmmoProbeReal(ar); break;
                             case "vac_grab": VacGrabReal(kind, ar); break;
                             case "vac_launch": VacLaunchReal(kind, ar); break;
                             case "slimes_home": SlimesHomeReal(ar); break;
@@ -2001,13 +2002,8 @@ namespace SlimeBridge
                 {
                     object hb = RunOnMain(() => AmmoCall(ammo, "GetCount", new object[] { id }));
                     haveBefore = hb is int ? (int)hb : 0;
-                    object addedObj = RunOnMain(() => AmmoCall(ammo, "MaybeAddToSlot", new object[] { id, null }));
+                    object addedObj = RunOnMain(() => AmmoCall(ammo, "MaybeAddToSlot", new object[] { id, idf }));
                     bool ammoOk = addedObj is bool && (bool)addedObj;
-                    if (!ammoOk)
-                    {
-                        addedObj = RunOnMain(() => AmmoCall(ammo, "MaybeAddToSlot", new object[] { id }));
-                        ammoOk = addedObj is bool && (bool)addedObj;
-                    }
                     if (ammoOk)
                     {
                         try { RunOnMain(() => vac.TryConsume()); }
@@ -2072,7 +2068,7 @@ namespace SlimeBridge
                     catch (Exception e) { UMFLog.Log("[SlimeBridge] econ err: " + e.Message); }
                     if (priceL <= 0) { PLORT_PRICE.TryGetValue(id, out priceL); if (priceL <= 0) priceL = 5; }
                     AddCurrencyReal(priceL);
-                    RunOnMain(() => AmmoCall(ammoL, "Decrement", new object[] { id }));
+                    RunOnMain(() => AmmoCall(ammoL, "Decrement", new object[] { id, 1 }));
                     ar.ok = true; ar.gains = priceL; ar.caught = id.ToString();
                     ar.note = "已售 " + id + "(原生经济$" + priceL + ",物品栏" + haveL + ">"
                               + (RunOnMain(() => AmmoCall(ammoL, "GetCount", new object[] { id })) ?? "?") + ") 资金$" + ReadMoneyReal();
@@ -2278,6 +2274,90 @@ namespace SlimeBridge
             ar.count = moved;
             ar.note = moved > 0 ? ("已把 " + moved + " 只越狱史莱姆搬回围栏") : "围栏外的史莱姆都在栏内，无需归栏";
         }
+
+        // ---- Ammo 实例探测（诊断物品栏获取路径）----
+        private void AmmoProbeReal(ActionResult ar)
+        {
+            var sb = new System.Text.StringBuilder();
+            var flags = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
+                | System.Reflection.BindingFlags.Instance;
+            // 1) PlayerState.GetAmmo 各重载逐一尝试并记录异常
+            if (_playerState != null)
+            {
+                sb.Append("[GetAmmo tries]\n");
+                foreach (var m in _playerState.GetType().GetMethods(flags))
+                {
+                    if (m.Name != "GetAmmo") continue;
+                    var ps = m.GetParameters();
+                    var pstr = new System.Text.StringBuilder();
+                    foreach (var pp in ps) pstr.Append(pp.ParameterType.Name).Append(" ");
+                    try
+                    {
+                        object[] args = new object[ps.Length];
+                        for (int i = 0; i < ps.Length; i++)
+                        {
+                            if (ps[i].ParameterType.IsEnum)
+                            {
+                                // 枚举：尝试每个值
+                                var vals = System.Enum.GetValues(ps[i].ParameterType);
+                                args[i] = vals.GetValue(0);
+                            }
+                            else if (ps[i].ParameterType.IsValueType)
+                                args[i] = System.Activator.CreateInstance(ps[i].ParameterType);
+                            else args[i] = null;
+                        }
+                        var v = m.Invoke(_playerState, args);
+                        sb.Append("  (").Append(pstr).Append(") => ").Append(v != null ? v.GetType().Name + " OK" : "null").Append("\n");
+                        if (v != null) { _ammoProbeHit = v; }
+                    }
+                    catch (Exception e)
+                    {
+                        sb.Append("  (").Append(pstr).Append(") EX: ").Append(e.InnerException != null ? e.InnerException.Message : e.Message).Append("\n");
+                    }
+                }
+            }
+            // 2) SceneContext / Player / WeaponVacuum 字段扫描找 Ammo
+            object[] roots = new object[] { _scene, _playerState, _player };
+            try
+            {
+                var wv = UnityEngine.Object.FindObjectsOfType<WeaponVacuum>();
+                if (wv != null && wv.Length > 0) roots = new object[] { _scene, _playerState, _player, wv[0] };
+            }
+            catch (Exception) { }
+            sb.Append("[field scan]\n");
+            foreach (var root in roots)
+            {
+                if (root == null) continue;
+                foreach (var f in root.GetType().GetFields(flags))
+                {
+                    if (f.FieldType.Name != "Ammo") continue;
+                    try
+                    {
+                        var v = f.GetValue(root);
+                        sb.Append("  ").Append(root.GetType().Name).Append(".").Append(f.Name)
+                          .Append(" = ").Append(v != null ? "Ammo OK" : "null").Append("\n");
+                        if (v != null) _ammoProbeHit = v;
+                    }
+                    catch (Exception) { }
+                }
+            }
+            // 3) 玩家 GameObject 上的组件找 Ammo（若 Ammo 是 MB）
+            if (_player != null)
+            {
+                foreach (var c in _player.GetComponentsInChildren<Component>(true))
+                {
+                    if (c != null && c.GetType().Name == "Ammo")
+                    {
+                        sb.Append("[player GO] found Ammo component: ").Append(c.gameObject.name).Append("\n");
+                        _ammoProbeHit = c;
+                    }
+                }
+            }
+            sb.Append("hit=").Append(_ammoProbeHit != null ? _ammoProbeHit.GetType().Name : "none");
+            ar.ok = true;
+            ar.note = sb.ToString();
+        }
+        private object _ammoProbeHit;
 
         // ---- 主动保存（诊断/恢复存档写入）----
         private void SaveNowReal(ActionResult ar)
