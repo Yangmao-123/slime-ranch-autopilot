@@ -37,6 +37,9 @@
 - [x] **英文文档**：`docs/COLLABORATION.en.md`、`docs/guide.en.md`
 - [x] **CI**：`.github/workflows/tests.yml` 跑 `unittest discover`
 
+**建议顺序**：先清事务性项 → P1 小改动大收益 → P0 无人机（下一个大块）。
+
+
 ### 已知未修（记录在案暂不处理）
 
 - `GetSystemMetrics` 多显示器场景未验证（当前单屏 1280×800 实测通过）
