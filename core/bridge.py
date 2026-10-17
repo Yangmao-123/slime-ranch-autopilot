@@ -407,8 +407,8 @@ class BridgeIOController:
         res = self._post_action("tp_item", kind or "food")
         return {"ok": res.get("ok", False), "note": res.get("note", "附近没有可瞬移的目标")}
 
-    def feed_show(self) -> Dict[str, Any]:
-        res = self._post_action("feed_show")
+    def feed_show(self, kind: str = "corral@0") -> Dict[str, Any]:
+        res = self._post_action("feed_show", kind or "corral@0")
         return {"ok": res.get("ok", False), "note": res.get("note", "投喂展示失败")}
 
     def save_now(self) -> Dict[str, Any]:

@@ -570,7 +570,8 @@ class WalkCaptureIO:
     def feed_here(self) -> Dict[str, Any]:
         """瞬移到围栏前、镜头真实对准（画面可见），食物以真实物理投进围栏。"""
         self._dismiss_if_paused()
-        tp = self.io.tp_plot("corral@%d" % getattr(self, "_corral_i", 0)) if hasattr(self.io, "tp_plot") else {"ok": False, "note": "无法瞬移到围栏"}
+        slot = "corral@%d" % getattr(self, "_corral_i", 0)
+        tp = self.io.tp_plot(slot) if hasattr(self.io, "tp_plot") else {"ok": False, "note": "无法瞬移到围栏"}
         self._corral_i = getattr(self, "_corral_i", 0) + 1
         if not tp.get("ok"):
             return tp
@@ -578,14 +579,14 @@ class WalkCaptureIO:
         win = self._load()
         if win not in (None, False):
             self._dismiss_if_paused()
-            target = self.io.scan_corral() if hasattr(self.io, "scan_corral") else {"ok": False}
+            target = self.io.scan_plot(slot) if hasattr(self.io, "scan_plot") else {"ok": False}
             if target.get("ok"):
-                self._turn_toward(target, rescanner=self.io.scan_corral, max_steps=12)
-                self._pitch_toward(self.io.scan_corral)   # 镜头真实对准围栏再投
+                self._turn_toward(target, rescanner=lambda: self.io.scan_plot(slot), max_steps=12)
+                self._pitch_toward(lambda: self.io.scan_plot(slot))
         thrown = {"ok": False, "note": ""}
         if hasattr(self.io, "vac_launch"):
-            thrown = self.io.vac_launch("corral")
-        magic = self.io.feed_show() if hasattr(self.io, "feed_show") else {"ok": False, "note": ""}
+            thrown = self.io.vac_launch(slot)
+        magic = self.io.feed_show(slot) if hasattr(self.io, "feed_show") else {"ok": False, "note": ""}
         notes = tp.get("note", "已到围栏前")
         if thrown.get("ok"):
             notes += "。" + thrown.get("note", "")
