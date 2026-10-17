@@ -535,6 +535,21 @@ class WalkCaptureIO:
         return {"ok": False, "gains": 0,
                 "note": "投进市场后资金没有增加，这次不算卖出"}
 
+    def collect_plorts_here(self) -> Dict[str, Any]:
+        """瞬移到每个围栏前收结晶（2026-10-18 取代收食物+投喂）。
+
+        有结晶收集器升级的围栏：从收集器储存槽取出——物品栏 +1、收集器 -1。
+        没有收集器的围栏：收集围栏范围内地上结晶——物品栏 +1、地上对应消失。
+        全部围栏一次完成，mod 端自动检测升级状态。
+        """
+        self._dismiss_if_paused()
+        if hasattr(self.io, "corral_collect"):
+            res = self.io.corral_collect("")
+            return {"ok": bool(res.get("ok")), "count": res.get("count", 0),
+                    "note": res.get("note", "")}
+        # 旧版 mod 兜底：逐个瞬移吸取结晶
+        return self.grab_here("plort")
+
     def grab_here(self, kind: str) -> Dict[str, Any]:
         """瞬移到物品旁、镜头真实对准（画面可见），吸取走游戏原生路径。
 
@@ -566,34 +581,6 @@ class WalkCaptureIO:
         if (not after.get("ok")) or float(after.get("dist", 1e9)) > float(target.get("dist", 0)) + 8:
             return {"ok": True, "note": "已瞬移到%s旁边并吸起" % label}
         return {"ok": False, "note": "%s，但吸附后目标仍在原地" % tp.get("note", "")}
-
-    def feed_here(self) -> Dict[str, Any]:
-        """瞬移到围栏前、镜头真实对准（画面可见），食物以真实物理投进围栏。"""
-        self._dismiss_if_paused()
-        slot = "corral@%d" % getattr(self, "_corral_i", 0)
-        tp = self.io.tp_plot(slot) if hasattr(self.io, "tp_plot") else {"ok": False, "note": "无法瞬移到围栏"}
-        self._corral_i = getattr(self, "_corral_i", 0) + 1
-        if not tp.get("ok"):
-            return tp
-        time.sleep(0.45)
-        win = self._load()
-        if win not in (None, False):
-            self._dismiss_if_paused()
-            target = self.io.scan_plot(slot) if hasattr(self.io, "scan_plot") else {"ok": False}
-            if target.get("ok"):
-                self._turn_toward(target, rescanner=lambda: self.io.scan_plot(slot), max_steps=12)
-                self._pitch_toward(lambda: self.io.scan_plot(slot))
-        thrown = {"ok": False, "note": ""}
-        if hasattr(self.io, "vac_launch"):
-            thrown = self.io.vac_launch(slot)
-        magic = self.io.feed_show(slot) if hasattr(self.io, "feed_show") else {"ok": False, "note": ""}
-        notes = tp.get("note", "已到围栏前")
-        if thrown.get("ok"):
-            notes += "。" + thrown.get("note", "")
-        if magic.get("note"):
-            notes += "。" + magic.get("note", "")
-        return {"ok": bool(thrown.get("ok") or magic.get("ok")),
-                "note": notes}
 
     def sell_here(self) -> Dict[str, Any]:
         """瞬移到结晶市场前，物品栏全部结晶按当日市价批量清仓。

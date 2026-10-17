@@ -1,8 +1,8 @@
 """大脑：观望 / 自主经营。
 
 默认观望，不操作游戏。按 V 进入自主经营：每个操作先瞬移到对应地点再执行，
-收食物、投喂、收结晶、卖掉，资金达到费用两倍才建造或升级。
-不跑图、不抓野生史莱姆。
+收结晶（围栏有收集器取储存槽、没有收集器捡地上的）、按当日市价在市场清仓，
+资金达到费用两倍才建造或升级。不跑图、不抓野生史莱姆、不收食物不投喂。
 
 运行：python core/main_controller.py --data-dir <dir> --config <cfg.json>
 可以 --ticks N --interval 0 --backend sim 快速验收。
@@ -214,32 +214,19 @@ class Brain:
             if self.ticks % 5 == 4:
                 self._infra_step()
             return
-        step = self.ticks % 5
+        # 经营轮换（2026-10-18）：收结晶 -> 卖 -> 建造/升级。
+        # 收食物与投喂已按需求取消：结晶交给围栏史莱姆自产，脚本只负责收和卖。
+        step = self.ticks % 3
         if step == 0:
-            food = self.walk.grab_here("food")
-            if food.get("aborted"):
-                return
-            self._say("food" if food.get("ok") else "no-food",
-                      f"【自主】{food.get('note', '')}", every=2 if food.get("ok") else 4)
-        elif step == 1:
-            fed = self.walk.feed_here()
-            if fed.get("aborted"):
-                return
-            self._say("feed", f"【自主】投喂：{fed.get('note', '')}", every=2)
-        elif step == 2:
-            plort = self.walk.grab_here("plort")
-            if plort.get("aborted"):
-                return
-            if plort.get("ok"):
+            got = self.walk.collect_plorts_here()
+            if got.get("ok"):
                 self._sell_pending = True
-            self._say("plort" if plort.get("ok") else "no-plort",
-                      f"【自主】{plort.get('note', '')}", every=2 if plort.get("ok") else 4)
-        elif step == 3:
+            self._say("collect" if got.get("ok") else "no-collect",
+                      f"【自主】{got.get('note', '')}", every=2 if got.get("ok") else 4)
+        elif step == 1:
             if not getattr(self, "_sell_pending", False):
                 return
             sold = self.walk.sell_here()
-            if sold.get("aborted"):
-                return
             if sold.get("ok"):
                 self._sell_pending = False
             self._say("sell", f"【自主】{sold.get('note', '')}", every=2 if sold.get("ok") else 3)

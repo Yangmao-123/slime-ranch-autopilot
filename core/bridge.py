@@ -425,6 +425,12 @@ class BridgeIOController:
         return {"ok": res.get("ok", False), "gains": res.get("gains", 0),
                 "count": res.get("count", 0), "note": res.get("note", "清仓失败")}
 
+    def corral_collect(self, kind: str = "") -> Dict[str, Any]:
+        """围栏收结晶：有结晶收集器取其储存槽，没有收集器收集围栏地上结晶。"""
+        res = self._post_action("corral_collect", kind or "")
+        return {"ok": res.get("ok", False), "count": res.get("count", 0),
+                "note": res.get("note", "围栏收取失败")}
+
     def build(self, kind: str) -> Dict[str, Any]:
         st = self._get_status()
         lvl = (st.get("facilities") or {}).get(kind, {}).get("level", 0)

@@ -554,6 +554,7 @@ namespace SlimeBridge
                             case "drone_setup": DroneSetupReal(ar); break;
                             case "cleanup_drones": CleanupDronesReal(ar); break;
                             case "market_sell_all": MarketSellAllReal(ar); break;
+                            case "corral_collect": CorralCollectReal(kind, ar); break;
                             case "debug_types": DebugTypesReal(kind, ar); break;
                             case "debug_cams": DebugCamsReal(ar); break;
                             case "debug_members": DebugMembersReal(kind, ar); break;
@@ -2070,6 +2071,190 @@ namespace SlimeBridge
             ar.count = units;
             ar.note = "结晶市场清仓：" + units + " 个结晶共 $" + total + "（" + lines.ToString()
                       + "），当前资金 $" + ReadMoneyReal();
+        }
+
+        // ---- 围栏收结晶（2026-10-18 用户需求：取代收食物+投喂）----
+        // 有结晶收集器升级的围栏：瞬移到围栏前，从收集器储存槽(SiloStorage)逐个取出
+        //   ——玩家物品栏 +1，收集器槽位 -1，直到收集器清空或物品栏满。
+        // 没有收集器的围栏：瞬移到围栏前，收集围栏范围内的地上结晶
+        //   ——物品栏 +1，地上结晶对应消失（Vacuumable.TryConsume 原生路径）。
+        private void CorralCollectReal(string kind, ActionResult ar)
+        {
+            EnsureScene();
+            if (_player == null) { ar.ok = false; ar.note = "未进入存档"; return; }
+            object playerAmmo = PlayerAmmo();
+            bool indexed = kind != null && kind.StartsWith("corral@");
+            int wantIdx = CorralIndex(kind);
+            int fromCollector = 0, fromGround = 0, skippedFull = 0;
+            var detail = new System.Text.StringBuilder();
+            int ci = 0;
+            foreach (LandPlot plot in AllCorrals())
+            {
+                int idx = ci; ci++;
+                if (indexed && idx != wantIdx) continue;
+                StandAt(plot.transform.position);   // 人出现在围栏前（画面可见）
+                PlortCollector pc = null;
+                try
+                {
+                    var pcs = plot.GetComponentsInChildren<PlortCollector>(true);
+                    if (pcs != null && pcs.Length > 0) pc = pcs[0];
+                }
+                catch (Exception) { }
+                if (pc != null)
+                {
+                    int taken = DrainCollector(pc, playerAmmo, plot.transform.position, ref skippedFull);
+                    if (taken > 0)
+                    {
+                        fromCollector += taken;
+                        if (detail.Length > 0) detail.Append("，");
+                        detail.Append("corral@").Append(idx).Append("收集器取").Append(taken);
+                    }
+                }
+                else
+                {
+                    int got = CollectGroundPlorts(plot.transform.position, playerAmmo, ref skippedFull);
+                    if (got > 0)
+                    {
+                        fromGround += got;
+                        if (detail.Length > 0) detail.Append("，");
+                        detail.Append("corral@").Append(idx).Append("地上捡").Append(got);
+                    }
+                }
+            }
+            int total = fromCollector + fromGround;
+            if (total == 0)
+            {
+                ar.ok = false;
+                ar.note = "围栏里没有可收的结晶" + (skippedFull > 0 ? "（物品栏满，跳过 " + skippedFull + " 个）" : "");
+                return;
+            }
+            ar.ok = true;
+            ar.count = total;
+            ar.note = "围栏收结晶：收集器 " + fromCollector + " 个 + 地上 " + fromGround
+                      + " 个（" + detail.ToString() + "）"
+                      + (skippedFull > 0 ? "，物品栏满跳过 " + skippedFull + " 个" : "");
+        }
+
+        // 按距离玩家排序的全部围栏（与 FindCorralByIndex 同序，corral@N 下标一致）
+        private List<LandPlot> AllCorrals()
+        {
+            var hits = new List<LandPlot>();
+            foreach (var lp in UnityEngine.Object.FindObjectsOfType<LandPlot>())
+            {
+                if (lp == null) continue;
+                LandPlotModel m = PlotModelOf(lp);
+                if (m != null && m.typeId == LandPlot.Id.CORRAL) hits.Add(lp);
+            }
+            Vector3 p = _player != null ? _player.transform.position : Vector3.zero;
+            hits.Sort(delegate(LandPlot a, LandPlot b)
+            {
+                float da = Vector3.Distance(p, a.transform.position);
+                float db = Vector3.Distance(p, b.transform.position);
+                return da.CompareTo(db);
+            });
+            return hits;
+        }
+
+        // 收集器取物：storage 是私有 SiloStorage，内含自己的 Ammo。逐个：
+        // MaybeAddToSlot 入玩家物品栏(+1)，成功后收集器 Decrement(id,1)(-1)。
+        private int DrainCollector(PlortCollector pc, object playerAmmo, Vector3 atPos, ref int skippedFull)
+        {
+            int taken = 0;
+            try
+            {
+                var flags = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
+                    | System.Reflection.BindingFlags.Instance;
+                var f = pc.GetType().GetField("storage", flags);
+                object silo = f != null ? f.GetValue(pc) : null;
+                if (silo == null) return 0;
+                var la = silo.GetType().GetProperty("LocalAmmo", flags);
+                object siloAmmo = la != null ? la.GetValue(silo, null) : null;
+                if (siloAmmo == null) return 0;
+                object u = AmmoCall(siloAmmo, "GetUsableSlotCount", new object[0]);
+                int usable = u is int ? (int)u : 0;
+                for (int i = 0; i < usable; i++)
+                {
+                    object idObj = AmmoCall(siloAmmo, "GetSlotName", new object[] { i });
+                    if (!(idObj is Identifiable.Id)) continue;
+                    Identifiable.Id sid = (Identifiable.Id)idObj;
+                    if (sid == Identifiable.Id.NONE || !PLORT_IDS.Contains(sid)) continue;
+                    object cObj = AmmoCall(siloAmmo, "GetSlotCount", new object[] { i });
+                    int cnt = cObj is int ? (int)cObj : 0;
+                    for (int n = 0; n < cnt; n++)
+                    {
+                        if (!AddOneToPlayerAmmo(playerAmmo, sid, atPos)) { skippedFull += cnt - n; break; }
+                        AmmoCall(siloAmmo, "Decrement", new object[] { sid, 1 });
+                        taken++;
+                    }
+                }
+            }
+            catch (Exception e) { UMFLog.Log("[SlimeBridge] drain err: " + e.Message); }
+            return taken;
+        }
+
+        // 玩家物品栏 +1：MaybeAddToSlot(id, null) 为主（以计数前后对比判定成功）；
+        // null Identifiable 不被接受时，退临时生成 prefab 实例入栏后销毁实例。
+        private bool AddOneToPlayerAmmo(object playerAmmo, Identifiable.Id id, Vector3 atPos)
+        {
+            if (playerAmmo == null) return false;
+            int before = 0;
+            object b = AmmoCall(playerAmmo, "GetCount", new object[] { id });
+            if (b is int) before = (int)b;
+            AmmoCall(playerAmmo, "MaybeAddToSlot", new object[] { id, null });
+            object a = AmmoCall(playerAmmo, "GetCount", new object[] { id });
+            if (a is int && (int)a > before) return true;
+            try
+            {
+                var gc = GameContext.Instance;
+                if (gc == null || gc.LookupDirector == null) return false;
+                GameObject pf = gc.LookupDirector.GetPrefab(id);
+                if (pf == null) return false;
+                GameObject inst = UnityEngine.Object.Instantiate(pf, atPos + Vector3.up * 1.2f, Quaternion.identity);
+                Identifiable idf = inst.GetComponent<Identifiable>();
+                AmmoCall(playerAmmo, "MaybeAddToSlot", new object[] { id, idf });
+                UnityEngine.Object.Destroy(inst);
+                object a2 = AmmoCall(playerAmmo, "GetCount", new object[] { id });
+                return a2 is int && (int)a2 > before;
+            }
+            catch (Exception) { return false; }
+        }
+
+        // 地上结晶：plot 中心半径 12m 内全部结晶逐个入栏并原生消失
+        private int CollectGroundPlorts(Vector3 center, object playerAmmo, ref int skippedFull)
+        {
+            var cands = new List<Identifiable>();
+            try
+            {
+                foreach (var idf in UnityEngine.Object.FindObjectsOfType<Identifiable>())
+                {
+                    if (idf == null || idf.gameObject == null) continue;
+                    if (!PLORT_IDS.Contains(idf.id)) continue;
+                    if (Vector3.Distance(center, idf.transform.position) > 12f) continue;
+                    if (idf.GetComponent<Vacuumable>() == null) continue;
+                    cands.Add(idf);
+                }
+            }
+            catch (Exception) { }
+            int got = 0;
+            foreach (var idf in cands)
+            {
+                if (idf == null) continue;   // 期间被史莱姆吃掉等
+                if (!AddOneToPlayerAmmo(playerAmmo, idf.id, idf.transform.position))
+                {
+                    skippedFull += cands.Count - got;
+                    break;
+                }
+                var vac = idf.GetComponent<Vacuumable>();
+                bool consumed = false;
+                try { if (vac != null) { vac.TryConsume(); consumed = true; } }
+                catch (Exception) { consumed = false; }
+                if (!consumed)
+                {
+                    try { UnityEngine.Object.Destroy(idf.gameObject); } catch (Exception) { }
+                }
+                got++;
+            }
+            return got;
         }
 
         private void DroneSetupReal(ActionResult ar)
