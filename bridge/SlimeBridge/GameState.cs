@@ -553,6 +553,7 @@ namespace SlimeBridge
                             case "feed_show": FeedShowReal(kind, ar); break;
                             case "drone_setup": DroneSetupReal(ar); break;
                             case "cleanup_drones": CleanupDronesReal(ar); break;
+                            case "market_sell_all": MarketSellAllReal(ar); break;
                             case "debug_types": DebugTypesReal(kind, ar); break;
                             case "debug_cams": DebugCamsReal(ar); break;
                             case "debug_members": DebugMembersReal(kind, ar); break;
@@ -2017,6 +2018,58 @@ namespace SlimeBridge
             ar.count = n;
             ar.note = n > 0 ? ("已清除 " + n + " 个无人机对象，请立刻保存存档")
                              : "场上没有无人机，无需清理";
+        }
+
+        // 市场批量清仓（2026-10-18 用户规则）：按结晶市场当日价格，物品栏里每减 1 个
+        // 结晶就给玩家 +当日单价，循环到物品栏结晶为 0。逐个 RegisterSold 进游戏经济
+        // 系统（市价与饱和度真实变化），每件间隔 0.12s 让资金读数一格一格往上涨。
+        private void MarketSellAllReal(ActionResult ar)
+        {
+            EnsureScene();
+            if (_player == null) { ar.ok = false; ar.note = "未进入存档"; return; }
+            object ammoL = PlayerAmmo();
+            if (ammoL == null) { ar.ok = false; ar.note = "真实物品栏不可用"; return; }
+            EconomyDirector[] econ = null;
+            try { econ = UnityEngine.Object.FindObjectsOfType<EconomyDirector>(); }
+            catch (Exception) { }
+            int total = 0, units = 0;
+            var lines = new System.Text.StringBuilder();
+            foreach (Identifiable.Id pid in PLORT_IDS)
+            {
+                object hL = RunOnMain(() => AmmoCall(ammoL, "GetCount", new object[] { pid }));
+                int cnt = hL is int ? (int)hL : 0;
+                if (cnt <= 0) continue;
+                int unitSum = 0;
+                for (int i = 0; i < cnt; i++)
+                {
+                    int price = 0;
+                    try
+                    {
+                        if (econ != null && econ.Length > 0)
+                        {
+                            float? v = econ[0].GetCurrValue(pid);
+                            price = Mathf.RoundToInt(v ?? 0);
+                            econ[0].RegisterSold(pid, 1);   // 当日市价随卖出逐个饱和
+                        }
+                    }
+                    catch (Exception e) { UMFLog.Log("[SlimeBridge] sellall econ err: " + e.Message); }
+                    if (price <= 0) { PLORT_PRICE.TryGetValue(pid, out price); if (price <= 0) price = 5; }
+                    AddCurrencyReal(price);
+                    RunOnMain(() => AmmoCall(ammoL, "Decrement", new object[] { pid, 1 }));
+                    unitSum += price;
+                    System.Threading.Thread.Sleep(120);   // 资金一格一格涨（与市场投结晶节奏一致）
+                }
+                total += unitSum;
+                units += cnt;
+                if (lines.Length > 0) lines.Append("，");
+                lines.Append(pid).Append("×").Append(cnt).Append("=$").Append(unitSum);
+            }
+            if (units == 0) { ar.ok = false; ar.note = "物品栏里没有结晶可卖"; return; }
+            ar.ok = true;
+            ar.gains = total;
+            ar.count = units;
+            ar.note = "结晶市场清仓：" + units + " 个结晶共 $" + total + "（" + lines.ToString()
+                      + "），当前资金 $" + ReadMoneyReal();
         }
 
         private void DroneSetupReal(ActionResult ar)

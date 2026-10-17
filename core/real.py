@@ -596,8 +596,34 @@ class WalkCaptureIO:
                 "note": notes}
 
     def sell_here(self) -> Dict[str, Any]:
-        """瞬移到结晶市场前，台账背包里的结晶以真实物理投进投入口（原生结算入账）。"""
+        """瞬移到结晶市场前，物品栏全部结晶按当日市价批量清仓。
+
+        结算规则（2026-10-18）：每从物品栏扣掉 1 个结晶，就按当日市价给玩家加
+        对应的钱（EconomyDirector.GetCurrValue + RegisterSold，市价/饱和度真实
+        变化），循环到物品栏结晶为 0。不依赖物理投掷和站位精度。
+        """
         self._dismiss_if_paused()
+        if hasattr(self.io, "market_sell_all"):
+            tp = self.io.tp_market() if hasattr(self.io, "tp_market") else {"ok": False, "note": "无法瞬移到市场"}
+            if not tp.get("ok"):
+                return {"ok": False, "gains": 0, "note": tp.get("note", "")}
+            time.sleep(0.45)
+            self._dismiss_if_paused()
+            res = self.io.market_sell_all()
+            if res.get("ok"):
+                return {"ok": True, "gains": res.get("gains", 0),
+                        "note": "已在结晶市场清仓：{}".format(res.get("note", ""))}
+            return {"ok": False, "gains": 0,
+                    "note": res.get("note", "清仓失败")}
+        # 旧版 mod：退回逐个 vac_launch 的市场结算
+        return self._sell_market_legacy()
+
+    def _sell_market_legacy(self, before: int = -1) -> Dict[str, Any]:
+        if before < 0:
+            try:
+                before = int(self.io.read_money())
+            except Exception:
+                before = -1
         tp = self.io.tp_market() if hasattr(self.io, "tp_market") else {"ok": False, "note": "无法瞬移到市场"}
         if not tp.get("ok"):
             return {"ok": False, "gains": 0, "note": tp.get("note", "")}
@@ -607,10 +633,6 @@ class WalkCaptureIO:
             self._dismiss_if_paused()
             if not self._turn_toward(self._scan_port_close(), rescanner=self._scan_port_close, max_steps=8):
                 pass  # 对准失败也继续：投掷走物理计算，不依赖准星
-        try:
-            before = int(self.io.read_money())
-        except Exception:
-            before = -1
         thrown = 0
         last_note = ""
         if hasattr(self.io, "vac_launch"):
