@@ -3,7 +3,7 @@
 [plugin]
 id = "slime_ranch_autopilot"
 name = "史莱姆牧场自动游玩"
-description = "让 NEKO 连接《史莱姆牧场》。默认观望，不操作游戏。按 V 键进入自主经营：先到结晶市场，再投喂、收结晶卖掉，钱够费用两倍才建造或升级。"
+description = "让 NEKO 连接《史莱姆牧场》。默认观望，不操作游戏。按 V 键进入自主经营：从结晶市场出发，挨个围栏收结晶（收集器/地上），物品栏满立刻回市场按当日市价清仓再继续，直到没结晶；每轮间隔循环时间（默认30s，面板可改）。钱够费用两倍才建造或升级。"
 version = "0.3.0"
 entry = "plugin.plugins.slime_ranch_autopilot:SlimeRanchAutopilotPlugin"
 type = "plugin"
@@ -40,6 +40,9 @@ permissions = ["state:read", "config:read", "action:call", "config:write", "logs
 [slime_ranch]
 # 语音模式下，玩家超过该秒数没有说话，则由 NEKO 自主接管游玩
 timeout_seconds = 10
+# 经营循环时间（秒，默认 30）：一轮完整循环 = 市场出发 → 挨个围栏收结晶（收集器/地上）
+# → 物品栏满立刻回市场按当日市价清仓再继续 → 直到没结晶 → 回市场门口等待下一轮。
+cycle_seconds = 30
 # 默认模式：watch(观望，不操作) 或 ranch(自主经营)。按 V 键切换。
 default_mode = "watch"
 # 史莱姆牧场一代 exe。留空时核心会在常见 Steam 目录里找；找不到就不自动启动游戏。

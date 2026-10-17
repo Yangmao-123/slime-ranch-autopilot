@@ -170,6 +170,7 @@ class SlimeRanchAutopilotPlugin(NekoPluginBase):
             "bridge_port": int(_get_cfg(self, "bridge_port", 8124)),
             "calibration": _get_cfg(self, "calibration", {}) or {},
             "live_fallback_funds": int(_get_cfg(self, "live_fallback_funds", 1000)),
+            "cycle_seconds": max(5, int(_get_cfg(self, "cycle_seconds", 30))),
         }
         path = os.path.join(self._runtime_dir, "config.json")
         with open(path, "w", encoding="utf-8") as f:
@@ -315,6 +316,7 @@ class SlimeRanchAutopilotPlugin(NekoPluginBase):
             "discovery": state.get("last_discovery", ""),
             "reports": state.get("reports", []),
             "timeout_seconds": int(_get_cfg(self, "timeout_seconds", 10)),
+            "cycle_seconds": int(_get_cfg(self, "cycle_seconds", 30)),
             "pid": self._proc.pid if self._proc else None,
         }
 
@@ -395,6 +397,26 @@ class SlimeRanchAutopilotPlugin(NekoPluginBase):
         self._sync_config_to_disk()
         self._write_command({"type": "set_timeout", "seconds": seconds})
         return Ok({"timeout_seconds": seconds})
+
+    @ui.action(label=tr("actions.setCycle", default="保存循环时间"), refresh_context=True)
+    @plugin_entry(
+        id="set_cycle",
+        name=tr("entries.setcycle.name", default="设置循环时间"),
+        description=tr("entries.setcycle.desc", default="自主经营一轮完整循环的间隔秒数（默认30s）"),
+        input_schema={
+            "type": "object",
+            "properties": {"seconds": {"type": "integer", "description": tr("fields.cycleSeconds", default="循环秒数")}},
+            "required": ["seconds"],
+        },
+    )
+    async def set_cycle(self, seconds: int = 30, **_):
+        seconds = max(5, int(seconds))
+        section = dict(self._cfg.get("slime_ranch", {}) or {})
+        section["cycle_seconds"] = seconds
+        self._cfg["slime_ranch"] = section
+        self._sync_config_to_disk()
+        self._write_command({"type": "set_cycle", "seconds": seconds})
+        return Ok({"cycle_seconds": seconds})
 
     @ui.action(label=tr("actions.pushCmd", default="执行指令"), refresh_context=True)
     @plugin_entry(

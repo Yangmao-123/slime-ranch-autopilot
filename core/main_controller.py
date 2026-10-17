@@ -214,24 +214,16 @@ class Brain:
             if self.ticks % 5 == 4:
                 self._infra_step()
             return
-        # 经营轮换（2026-10-18）：收结晶 -> 卖 -> 建造/升级。
-        # 收食物与投喂已按需求取消：结晶交给围栏史莱姆自产，脚本只负责收和卖。
-        step = self.ticks % 3
-        if step == 0:
-            got = self.walk.collect_plorts_here()
-            if got.get("ok"):
-                self._sell_pending = True
-            self._say("collect" if got.get("ok") else "no-collect",
-                      f"【自主】{got.get('note', '')}", every=2 if got.get("ok") else 4)
-        elif step == 1:
-            if not getattr(self, "_sell_pending", False):
-                return
-            sold = self.walk.sell_here()
-            if sold.get("ok"):
-                self._sell_pending = False
-            self._say("sell", f"【自主】{sold.get('note', '')}", every=2 if sold.get("ok") else 3)
-        elif self.mode == "ranch":
-            self._infra_step()
+        # 一轮 = 完整经营循环（mod 端编排：市场出发→挨个围栏收取→满包立刻回市场
+        # 按当日市价清仓再继续→直到地上/收集器没结晶→回市场门口等待）。
+        # 收食物与投喂已按需求取消；循环结束后按资金闸推进建造/升级。
+        cyc = self.walk.ranch_cycle()
+        if cyc.get("ok"):
+            self._sell_pending = False
+            self._say("cycle", f"【自主】{cyc.get('note', '')}", every=2)
+        else:
+            self._say("no-cycle", f"【自主】{cyc.get('note', '')}", every=4)
+        self._infra_step()
 
     # ------------------------------------------------------------ 需求1 建造/升级（真实 UI 购买）
     def _facilities_signature(self):
@@ -353,6 +345,7 @@ class Brain:
                 time.sleep(self._interval())
                 continue
 
+            t0 = time.time()
             self._ranch_tick()
             self.c.set_state(mode="ranch",
                              phase="running" if self._market_ready else "resetting",
@@ -360,7 +353,12 @@ class Brain:
                              infra=dict(self.ranch.level),
                              slimes=list(self.ranch.known_slimes))
             self._push_overlay()
-            time.sleep(self._interval())
+            if self.walk:
+                # 循环时间（面板可改，默认 30s）：从本轮开始计（含循环执行耗时）
+                rest = float(getattr(self.s, "cycle_seconds", 30)) - (time.time() - t0)
+                time.sleep(max(1.0, rest))
+            else:
+                time.sleep(self._interval())
 
         self.c.set_state(running=False, phase="stopped")
         self._hotkey.stop()
@@ -378,6 +376,9 @@ class Brain:
         elif t == "set_timeout":
             self.s.timeout_seconds = max(1, int(cmd.get("seconds", self.s.timeout_seconds)))
             self.c.say(f"接管秒数已更新为 {self.s.timeout_seconds}s")
+        elif t == "set_cycle":
+            self.s.cycle_seconds = max(5, int(cmd.get("seconds", getattr(self.s, "cycle_seconds", 30))))
+            self.c.say(f"循环时间已更新为 {self.s.cycle_seconds}s")
         elif t == "command":
             text = cmd.get("text", "")
             res = run_manual_command(self.io, text)

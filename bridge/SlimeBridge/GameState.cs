@@ -514,6 +514,18 @@ namespace SlimeBridge
             lock (_lock)
             {
                 var ar = new ActionResult { strategy = strategy };
+                // 长流程动作用 HTTP 线程编排（每个游戏操作单独 RunOnMain 上主线程，
+                // 节奏休眠留在 HTTP 线程），否则主线程 Sleep 会把游戏冻住。
+                if (action == "ranch_cycle" || action == "market_sell_all")
+                {
+                    try
+                    {
+                        if (action == "ranch_cycle") RanchCycleReal(ar);
+                        else MarketSellAllReal(ar);
+                    }
+                    catch (Exception e) { ar.ok = false; ar.note = "执行异常: " + e.Message; }
+                    return ar;
+                }
                 RunOnMain(() =>
                 {
                     try
@@ -555,6 +567,7 @@ namespace SlimeBridge
                             case "cleanup_drones": CleanupDronesReal(ar); break;
                             case "market_sell_all": MarketSellAllReal(ar); break;
                             case "corral_collect": CorralCollectReal(kind, ar); break;
+                            case "ranch_cycle": break;   // 已在分发旁路处理（HTTP 线程编排）
                             case "debug_types": DebugTypesReal(kind, ar); break;
                             case "debug_cams": DebugCamsReal(ar); break;
                             case "debug_members": DebugMembersReal(kind, ar); break;
@@ -2029,53 +2042,71 @@ namespace SlimeBridge
         // 市场批量清仓（2026-10-18 用户规则）：按结晶市场当日价格，物品栏里每减 1 个
         // 结晶就给玩家 +当日单价，循环到物品栏结晶为 0。逐个 RegisterSold 进游戏经济
         // 系统（市价与饱和度真实变化），每件间隔 0.12s 让资金读数一格一格往上涨。
+        // HTTP 线程编排：单件结算 RunOnMain 上主线程，休眠在 HTTP 线程，不冻结游戏。
         private void MarketSellAllReal(ActionResult ar)
         {
-            EnsureScene();
+            RunOnMain(() => EnsureScene());
             if (_player == null) { ar.ok = false; ar.note = "未进入存档"; return; }
-            object ammoL = PlayerAmmo();
+            object ammoL = RunOnMain(() => PlayerAmmo());
             if (ammoL == null) { ar.ok = false; ar.note = "真实物品栏不可用"; return; }
-            EconomyDirector[] econ = null;
-            try { econ = UnityEngine.Object.FindObjectsOfType<EconomyDirector>(); }
-            catch (Exception) { }
-            int total = 0, units = 0;
             var lines = new System.Text.StringBuilder();
+            int units, value;
+            SellAllFromAmmo(ammoL, out units, out value, lines);
+            if (units == 0) { ar.ok = false; ar.note = "物品栏里没有结晶可卖"; return; }
+            ar.ok = true;
+            ar.gains = value;
+            ar.count = units;
+            ar.note = "结晶市场清仓：" + units + " 个结晶共 $" + value + "（" + lines.ToString()
+                      + "），当前资金 $" + RunOnMain(() => ReadMoneyReal());
+        }
+
+        // 批量结算主体（HTTP 线程）：遍历全部结晶 Id，逐件 当日市价+RegisterSold+
+        // 加钱+扣物品栏，0.12s/件，直到物品栏结晶清零。明细写进 lines。
+        private void SellAllFromAmmo(object ammoL, out int unitsOut, out int valueOut, System.Text.StringBuilder lines)
+        {
+            unitsOut = 0;
+            valueOut = 0;
+            EconomyDirector[] econ = RunOnMain(() => UnityEngine.Object.FindObjectsOfType<EconomyDirector>());
             foreach (Identifiable.Id pid in PLORT_IDS)
             {
                 object hL = RunOnMain(() => AmmoCall(ammoL, "GetCount", new object[] { pid }));
                 int cnt = hL is int ? (int)hL : 0;
                 if (cnt <= 0) continue;
-                int unitSum = 0;
+                int unitSum = 0, sold = 0;
                 for (int i = 0; i < cnt; i++)
                 {
-                    int price = 0;
-                    try
-                    {
-                        if (econ != null && econ.Length > 0)
-                        {
-                            float? v = econ[0].GetCurrValue(pid);
-                            price = Mathf.RoundToInt(v ?? 0);
-                            econ[0].RegisterSold(pid, 1);   // 当日市价随卖出逐个饱和
-                        }
-                    }
-                    catch (Exception e) { UMFLog.Log("[SlimeBridge] sellall econ err: " + e.Message); }
-                    if (price <= 0) { PLORT_PRICE.TryGetValue(pid, out price); if (price <= 0) price = 5; }
-                    AddCurrencyReal(price);
-                    RunOnMain(() => AmmoCall(ammoL, "Decrement", new object[] { pid, 1 }));
+                    int price = RunOnMain(() => SellOneUnit(econ, ammoL, pid));
+                    if (price <= 0) break;   // 物品栏异常变动，停
                     unitSum += price;
-                    System.Threading.Thread.Sleep(120);   // 资金一格一格涨（与市场投结晶节奏一致）
+                    sold++;
+                    System.Threading.Thread.Sleep(120);   // 资金一格一格涨（HTTP 线程休眠不冻结游戏）
                 }
-                total += unitSum;
-                units += cnt;
+                if (sold <= 0) continue;
+                unitsOut += sold;
+                valueOut += unitSum;
                 if (lines.Length > 0) lines.Append("，");
-                lines.Append(pid).Append("×").Append(cnt).Append("=$").Append(unitSum);
+                lines.Append(pid).Append("×").Append(sold).Append("=$").Append(unitSum);
             }
-            if (units == 0) { ar.ok = false; ar.note = "物品栏里没有结晶可卖"; return; }
-            ar.ok = true;
-            ar.gains = total;
-            ar.count = units;
-            ar.note = "结晶市场清仓：" + units + " 个结晶共 $" + total + "（" + lines.ToString()
-                      + "），当前资金 $" + ReadMoneyReal();
+        }
+
+        // 主线程：卖出 1 个结晶（当日市价 + 饱和登记 + 加钱 + 物品栏-1），返回结算单价。
+        private int SellOneUnit(EconomyDirector[] econ, object ammoL, Identifiable.Id pid)
+        {
+            int price = 0;
+            try
+            {
+                if (econ != null && econ.Length > 0)
+                {
+                    float? v = econ[0].GetCurrValue(pid);
+                    price = Mathf.RoundToInt(v ?? 0);
+                    econ[0].RegisterSold(pid, 1);   // 当日市价随卖出逐个饱和
+                }
+            }
+            catch (Exception e) { UMFLog.Log("[SlimeBridge] econ err: " + e.Message); }
+            if (price <= 0) { PLORT_PRICE.TryGetValue(pid, out price); if (price <= 0) price = 5; }
+            AddCurrencyReal(price);
+            AmmoCall(ammoL, "Decrement", new object[] { pid, 1 });
+            return price;
         }
 
         // ---- 围栏收结晶（2026-10-18 用户需求：取代收食物+投喂）----
@@ -2097,33 +2128,13 @@ namespace SlimeBridge
             {
                 int idx = ci; ci++;
                 if (indexed && idx != wantIdx) continue;
-                StandAt(plot.transform.position);   // 人出现在围栏前（画面可见）
-                PlortCollector pc = null;
-                try
+                bool full, usedCollector;
+                int taken = CollectOneCorral(plot, playerAmmo, ref skippedFull, out full, out usedCollector);
+                if (taken > 0)
                 {
-                    var pcs = plot.GetComponentsInChildren<PlortCollector>(true);
-                    if (pcs != null && pcs.Length > 0) pc = pcs[0];
-                }
-                catch (Exception) { }
-                if (pc != null)
-                {
-                    int taken = DrainCollector(pc, playerAmmo, plot.transform.position, ref skippedFull);
-                    if (taken > 0)
-                    {
-                        fromCollector += taken;
-                        if (detail.Length > 0) detail.Append("，");
-                        detail.Append("corral@").Append(idx).Append("收集器取").Append(taken);
-                    }
-                }
-                else
-                {
-                    int got = CollectGroundPlorts(plot.transform.position, playerAmmo, ref skippedFull);
-                    if (got > 0)
-                    {
-                        fromGround += got;
-                        if (detail.Length > 0) detail.Append("，");
-                        detail.Append("corral@").Append(idx).Append("地上捡").Append(got);
-                    }
+                    if (usedCollector) fromCollector += taken; else fromGround += taken;
+                    if (detail.Length > 0) detail.Append("，");
+                    detail.Append("corral@").Append(idx).Append(usedCollector ? "收集器取" : "地上捡").Append(taken);
                 }
             }
             int total = fromCollector + fromGround;
@@ -2141,6 +2152,97 @@ namespace SlimeBridge
             ar.note = "围栏收结晶：收集器 " + fromCollector + " 个 + 地上 " + fromGround
                       + " 个（" + detail.ToString() + "）"
                       + (skippedFull > 0 ? "，物品栏满跳过 " + skippedFull + " 个" : "");
+        }
+
+        // 完整经营循环（2026-10-18 用户定义）：从结晶市场出发 → 挨个瞬移到围栏收取
+        // （有收集器取储存槽/没有收集器捡地上）→ 物品栏满则立刻回市场按当日市价清仓，
+        // 卖完继续瞬移到围栏收集 → 直到所有围栏地上/收集器都没有结晶 → 最后回市场清仓，
+        // 人在市场门口结束。HTTP 线程编排：每个游戏操作单独 RunOnMain，节奏休眠不冻结游戏。
+        private void RanchCycleReal(ActionResult ar)
+        {
+            RunOnMain(() => EnsureScene());
+            if (_player == null) { ar.ok = false; ar.note = "未进入存档"; return; }
+            object playerAmmo = RunOnMain(() => PlayerAmmo());
+            RunOnMain(() => { TeleportToMarketStand(); });   // 起点：市场门口
+            System.Threading.Thread.Sleep(400);
+            int totalGot = 0, totalUnits = 0, totalValue = 0, sellRuns = 0;
+            bool anyCorral = false;
+            for (int round = 0; round < 30; round++)
+            {
+                List<LandPlot> corrals = RunOnMain(() => AllCorrals());
+                if (corrals == null || corrals.Count == 0) break;
+                anyCorral = true;
+                int passGot = 0;
+                bool hitFull = false;
+                int ci = 0;
+                while (ci < corrals.Count)
+                {
+                    LandPlot plot = corrals[ci];
+                    var res = new int[2];   // [0]=收到数 [1]=满包标记
+                    RunOnMain(() =>
+                    {
+                        bool full, usedCollector;
+                        int sk = 0;
+                        int g = CollectOneCorral(plot, playerAmmo, ref sk, out full, out usedCollector);
+                        res[0] = g;
+                        res[1] = full ? 1 : 0;
+                    });
+                    passGot += res[0];
+                    if (res[1] == 1) { hitFull = true; break; }
+                    ci++;
+                    System.Threading.Thread.Sleep(350);   // 围栏间节奏（画面可见）
+                }
+                totalGot += passGot;
+                if (hitFull)
+                {
+                    // 物品栏满：立刻回市场清仓，卖完继续收
+                    RunOnMain(() => { TeleportToMarketStand(); });
+                    System.Threading.Thread.Sleep(300);
+                    var lines = new System.Text.StringBuilder();
+                    int units, value;
+                    SellAllFromAmmo(playerAmmo, out units, out value, lines);
+                    totalUnits += units;
+                    totalValue += value;
+                    sellRuns++;
+                    continue;
+                }
+                if (passGot == 0) break;   // 地上/收集器都没有结晶 → 循环完成
+            }
+            // 终局：回市场把剩余全部卖掉，人在市场门口等待下一轮
+            RunOnMain(() => { TeleportToMarketStand(); });
+            System.Threading.Thread.Sleep(300);
+            var lines2 = new System.Text.StringBuilder();
+            int units2, value2;
+            SellAllFromAmmo(playerAmmo, out units2, out value2, lines2);
+            totalUnits += units2;
+            totalValue += value2;
+            ar.ok = totalGot > 0;
+            ar.count = totalGot;
+            ar.gains = totalValue;
+            if (!anyCorral) { ar.note = "牧场上没有围栏，无法收结晶"; return; }
+            ar.note = totalGot > 0
+                ? "循环完成：共收 " + totalGot + " 个结晶，卖出 " + totalUnits + " 个得 $" + totalValue
+                  + (sellRuns > 0 ? "（途中满包回卖 " + sellRuns + " 次）" : "") + "，在市场门口等待下一轮"
+                : "围栏地上/收集器都没有结晶，在市场门口等待";
+        }
+
+        // 主线程执行：瞬移到该围栏前收取（有收集器取储存槽/没有收集器捡地上），
+        // 返回收到数量；物品栏满 full=true；usedCollector 报告走的是哪条路径。
+        private int CollectOneCorral(LandPlot plot, object playerAmmo, ref int skippedFull, out bool full, out bool usedCollector)
+        {
+            full = false;
+            StandAt(plot.transform.position);   // 人出现在围栏前（画面可见）
+            PlortCollector pc = null;
+            try
+            {
+                var pcs = plot.GetComponentsInChildren<PlortCollector>(true);
+                if (pcs != null && pcs.Length > 0) pc = pcs[0];
+            }
+            catch (Exception) { }
+            usedCollector = pc != null;
+            if (pc != null)
+                return DrainCollector(pc, playerAmmo, plot.transform.position, ref skippedFull, out full);
+            return CollectGroundPlorts(plot.transform.position, playerAmmo, ref skippedFull, out full);
         }
 
         // 按距离玩家排序的全部围栏（与 FindCorralByIndex 同序，corral@N 下标一致）
@@ -2165,8 +2267,9 @@ namespace SlimeBridge
 
         // 收集器取物：storage 是私有 SiloStorage，内含自己的 Ammo。逐个：
         // MaybeAddToSlot 入玩家物品栏(+1)，成功后收集器 Decrement(id,1)(-1)。
-        private int DrainCollector(PlortCollector pc, object playerAmmo, Vector3 atPos, ref int skippedFull)
+        private int DrainCollector(PlortCollector pc, object playerAmmo, Vector3 atPos, ref int skippedFull, out bool full)
         {
+            full = false;
             int taken = 0;
             try
             {
@@ -2190,7 +2293,7 @@ namespace SlimeBridge
                     int cnt = cObj is int ? (int)cObj : 0;
                     for (int n = 0; n < cnt; n++)
                     {
-                        if (!AddOneToPlayerAmmo(playerAmmo, sid, atPos)) { skippedFull += cnt - n; break; }
+                        if (!AddOneToPlayerAmmo(playerAmmo, sid, atPos)) { skippedFull += cnt - n; full = true; return taken; }
                         AmmoCall(siloAmmo, "Decrement", new object[] { sid, 1 });
                         taken++;
                     }
@@ -2228,8 +2331,9 @@ namespace SlimeBridge
         }
 
         // 地上结晶：plot 中心半径 12m 内全部结晶逐个入栏并原生消失
-        private int CollectGroundPlorts(Vector3 center, object playerAmmo, ref int skippedFull)
+        private int CollectGroundPlorts(Vector3 center, object playerAmmo, ref int skippedFull, out bool full)
         {
+            full = false;
             var cands = new List<Identifiable>();
             try
             {
@@ -2250,7 +2354,8 @@ namespace SlimeBridge
                 if (!AddOneToPlayerAmmo(playerAmmo, idf.id, idf.transform.position))
                 {
                     skippedFull += cands.Count - got;
-                    break;
+                    full = true;
+                    return got;
                 }
                 var vac = idf.GetComponent<Vacuumable>();
                 bool consumed = false;

@@ -535,6 +535,27 @@ class WalkCaptureIO:
         return {"ok": False, "gains": 0,
                 "note": "投进市场后资金没有增加，这次不算卖出"}
 
+    def ranch_cycle(self) -> Dict[str, Any]:
+        """完整经营循环（2026-10-18 用户定义，mod 端编排整个流程）：
+        市场出发 → 挨个瞬移到围栏收取（收集器/地上）→ 物品栏满立刻回市场按当日
+        市价清仓再继续 → 直到地上/收集器都没结晶 → 回市场门口等待下一轮。
+        """
+        self._dismiss_if_paused()
+        if hasattr(self.io, "ranch_cycle"):
+            try:
+                res = self.io.ranch_cycle()
+            except Exception as e:
+                return {"ok": False, "note": f"循环异常：{e}"}
+            return {"ok": bool(res.get("ok")), "count": res.get("count", 0),
+                    "gains": res.get("gains", 0), "note": res.get("note", "")}
+        # 旧版 mod 兜底：收一轮 + 卖一轮
+        got = self.collect_plorts_here()
+        sold = self.sell_here() if got.get("ok") else {"ok": False, "note": ""}
+        note = got.get("note", "")
+        if sold.get("ok"):
+            note += "。已售出，收入 $" + str(sold.get("gains", 0))
+        return {"ok": bool(got.get("ok")), "note": note}
+
     def collect_plorts_here(self) -> Dict[str, Any]:
         """瞬移到每个围栏前收结晶（2026-10-18 取代收食物+投喂）。
 

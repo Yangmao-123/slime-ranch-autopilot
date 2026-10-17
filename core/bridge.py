@@ -50,12 +50,12 @@ class BridgeClient:
         except Exception:
             return None
 
-    def post_json(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any] | None:
+    def post_json(self, path: str, payload: Dict[str, Any], timeout: float = 0) -> Dict[str, Any] | None:
         data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(self.base + path, data=data, method="POST")
         req.add_header("Content-Type", "application/json")
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as r:
+            with urllib.request.urlopen(req, timeout=timeout or self.timeout) as r:
                 return json.loads(r.read().decode("utf-8"))
         except Exception:
             return None
@@ -166,8 +166,8 @@ class BridgeIOController:
         self._last_status = st
         return st
 
-    def _post_action(self, action: str, kind: str = "") -> Dict[str, Any]:
-        res = self.client.post_json("/api/action", {"action": action, "kind": kind}) or {}
+    def _post_action(self, action: str, kind: str = "", timeout: float = 0) -> Dict[str, Any]:
+        res = self.client.post_json("/api/action", {"action": action, "kind": kind}, timeout=timeout) or {}
         return res
 
     def scan_target(self, radius: float = 25.0) -> Dict[str, Any]:
@@ -430,6 +430,13 @@ class BridgeIOController:
         res = self._post_action("corral_collect", kind or "")
         return {"ok": res.get("ok", False), "count": res.get("count", 0),
                 "note": res.get("note", "围栏收取失败")}
+
+    def ranch_cycle(self) -> Dict[str, Any]:
+        """完整经营循环：市场出发→挨个围栏收取→满包立刻回市场清仓再继续→
+        直到地上/收集器都没结晶→回市场门口结束。长流程，超时 10 分钟。"""
+        res = self._post_action("ranch_cycle", "", timeout=600.0)
+        return {"ok": res.get("ok", False), "count": res.get("count", 0),
+                "gains": res.get("gains", 0), "note": res.get("note", "循环失败")}
 
     def build(self, kind: str) -> Dict[str, Any]:
         st = self._get_status()
