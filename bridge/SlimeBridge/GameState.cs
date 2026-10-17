@@ -1560,10 +1560,10 @@ namespace SlimeBridge
                 Vector3 forward = AimForward();
                 ar.px = p.x; ar.py = p.z;
                 Vector3 flatF = forward; flatF.y = 0f;
-                // 站位点：投入口开孔 + 朝庭院方向 * 14m（站在庭院里面对开孔，可把结晶投进去）
+                // 站位点：投入口开孔 + 朝庭院方向 * 3.5m，高度取投入口同层（市场平台层）
                 Vector3 port = _cachedMarket.Value;
-                Vector3 stand = port + _cachedStandDir * 3.5f;   // 与 tp_market 站位一致(旧14m造成角色停在离市场14米处)
-                stand.y = p.y;
+                Vector3 stand = port + _cachedStandDir * 3.5f;
+                stand.y = port.y;   // 与 tp_market 一致；旧版沿用玩家当前高度会停在平台下面
                 Vector3 toStand = stand - p; toStand.y = 0f;
                 float standDist = Vector3.Distance(p, stand);
                 float standYaw = (toStand.sqrMagnitude < 0.0001f || flatF.sqrMagnitude < 0.0001f)
@@ -1594,30 +1594,35 @@ namespace SlimeBridge
         {
             EnsureScene();
             if (_player == null) { ar.ok = false; ar.note = "未进入存档"; return; }
-            try
+            if (!TeleportToMarketStand()) { ar.ok = false; ar.note = "场景中找不到结晶市场"; return; }
+            ar.ok = true;
+            ar.area = "牧场";
+            ar.note = "已瞬移到结晶市场投入口前";
+        }
+
+        // 瞬移到结晶市场站位：投入口开孔同高（市场平台层）+ 朝庭院 3.5m，面向投入口。
+        // 旧版站位沿用玩家当前高度，从牧场低处瞬移会停在市场平台下面（高度偏差的根因）。
+        private bool TeleportToMarketStand()
+        {
+            if (_player == null) return false;
+            if (_cachedMarket == null && !_marketFailed)
             {
-                if (_cachedMarket == null && !_marketFailed)
-                {
-                    _cachedMarket = FindMarketPos();
-                    if (_cachedMarket == null) _marketFailed = true;
-                }
-                if (_cachedMarket == null) { ar.ok = false; ar.note = "场景中找不到结晶市场"; return; }
-                Vector3 port = _cachedMarket.Value;
-                Vector3 stand = port + _cachedStandDir * 3.5f;
-                stand.y = _player.transform.position.y;
-                Vector3 look = port - stand;
-                look.y = 0f;
-                RunOnMain(() =>
-                {
-                    _player.transform.position = stand + Vector3.up * 0.5f;
-                    if (look.sqrMagnitude > 0.01f)
-                        _player.transform.rotation = Quaternion.LookRotation(look.normalized);
-                });
-                ar.ok = true;
-                ar.area = "牧场";
-                ar.note = "已瞬移到结晶市场前";
+                _cachedMarket = FindMarketPos();
+                if (_cachedMarket == null) _marketFailed = true;
             }
-            catch (Exception e) { ar.ok = false; ar.note = "传送到市场失败: " + e.Message; }
+            if (_cachedMarket == null) return false;
+            Vector3 port = _cachedMarket.Value;
+            Vector3 stand = port + _cachedStandDir * 3.5f;
+            stand.y = port.y;   // 市场平台层（投入口开孔就开在平台地板上）
+            Vector3 look = port - stand;
+            look.y = 0f;
+            RunOnMain(() =>
+            {
+                _player.transform.position = stand + Vector3.up * 0.5f;
+                if (look.sqrMagnitude > 0.01f)
+                    _player.transform.rotation = Quaternion.LookRotation(look.normalized);
+            });
+            return true;
         }
 
         // 把玩家放到地块跟前并转向它，让购买/投喂发生在镜头里。
@@ -2124,8 +2129,11 @@ namespace SlimeBridge
             int total = fromCollector + fromGround;
             if (total == 0)
             {
+                // 地上/收集器都没有结晶：回到市场门口待命（下一轮结晶产出后再来收）。
+                bool atMarket = TeleportToMarketStand();
                 ar.ok = false;
-                ar.note = "围栏里没有可收的结晶" + (skippedFull > 0 ? "（物品栏满，跳过 " + skippedFull + " 个）" : "");
+                ar.note = "围栏里没有可收的结晶" + (skippedFull > 0 ? "（物品栏满，跳过 " + skippedFull + " 个）" : "")
+                          + (atMarket ? "，已在市场门口等待" : "");
                 return;
             }
             ar.ok = true;
