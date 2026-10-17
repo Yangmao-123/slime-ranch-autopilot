@@ -552,6 +552,7 @@ namespace SlimeBridge
                             case "tp_item": TeleportItemReal(kind, ar); break;
                             case "feed_show": FeedShowReal(kind, ar); break;
                             case "drone_setup": DroneSetupReal(ar); break;
+                            case "cleanup_drones": CleanupDronesReal(ar); break;
                             case "debug_types": DebugTypesReal(kind, ar); break;
                             case "debug_cams": DebugCamsReal(ar); break;
                             case "debug_members": DebugMembersReal(kind, ar); break;
@@ -1559,7 +1560,7 @@ namespace SlimeBridge
                 Vector3 flatF = forward; flatF.y = 0f;
                 // 站位点：投入口开孔 + 朝庭院方向 * 14m（站在庭院里面对开孔，可把结晶投进去）
                 Vector3 port = _cachedMarket.Value;
-                Vector3 stand = port + _cachedStandDir * 14f;
+                Vector3 stand = port + _cachedStandDir * 3.5f;   // 与 tp_market 站位一致(旧14m造成角色停在离市场14米处)
                 stand.y = p.y;
                 Vector3 toStand = stand - p; toStand.y = 0f;
                 float standDist = Vector3.Distance(p, stand);
@@ -1973,6 +1974,51 @@ namespace SlimeBridge
         // 给牧场上的无人机写搬运程序。没有无人机时尝试放一台。
         // 程序槽的真实字段要等活体无人机才能完全对上，这里按侦察到的
         // DroneProgramV01{target,source,destination} 和 Source/Destination 类型名去写。
+        // ---- 清除场上全部无人机（修复残废无人机破坏存档）----
+        // TrySpawnOneDrone 生成的无人机缺初始化(电池/区域注册)，每帧 NRE 且炸掉
+        // RegionRegistry 序列化导致存档失败。此动作销毁场上所有 DroneGadget/站桩，
+        // 之后 save_now 即可保存出干净档。
+        private void CleanupDronesReal(ActionResult ar)
+        {
+            EnsureScene();
+            if (_player == null) { ar.ok = false; ar.note = "未进入存档"; return; }
+            int n = 0;
+            try
+            {
+                var gadgets = UnityEngine.Object.FindObjectsOfType<DroneGadget>();
+                if (gadgets != null)
+                {
+                    foreach (var g in gadgets)
+                    {
+                        if (g == null) continue;
+                        var go = g.gameObject;
+                        try { RunOnMain(() => g.OnUserDestroyed()); }
+                        catch (Exception) { }
+                        try { RunOnMain(() => UnityEngine.Object.Destroy(go)); } catch (Exception) { }
+                        n++;
+                    }
+                }
+                var stations = UnityEngine.Object.FindObjectsOfType<DroneStation>();
+                if (stations != null)
+                {
+                    foreach (var st in stations)
+                    {
+                        if (st == null) continue;
+                        var go = st.gameObject;
+                        try { RunOnMain(() => st.RequestDestroy("cleanup")); }
+                        catch (Exception) { }
+                        try { RunOnMain(() => UnityEngine.Object.Destroy(go)); } catch (Exception) { }
+                        n++;
+                    }
+                }
+            }
+            catch (Exception e) { ar.ok = false; ar.note = "清理异常: " + e.Message; return; }
+            ar.ok = true;
+            ar.count = n;
+            ar.note = n > 0 ? ("已清除 " + n + " 个无人机对象，请立刻保存存档")
+                             : "场上没有无人机，无需清理";
+        }
+
         private void DroneSetupReal(ActionResult ar)
         {
             EnsureScene();

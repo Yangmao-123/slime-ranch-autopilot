@@ -12,6 +12,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "default_mode": "watch",
     "game_exe": "",
     "auto_launch_game": False,
+    "enable_drones": False,   # 无人机搬运（实验）：当前生成的无人机缺初始化会破坏存档，保持 false
     "engine_python": "",
     "backend": "hybrid",  # hybrid=混合(桥接感知+真实键鼠执行,推荐)；ws=桥接；sim=模拟；live=键鼠校准
     # live 校准：money_region={left,top,width,height}(0..1 归一化)、

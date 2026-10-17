@@ -202,10 +202,14 @@ class Brain:
             return
         if not self._drone_checked:
             self._drone_checked = True
-            setup = self.io.drone_setup() if hasattr(self.io, "drone_setup") else {"ok": False, "note": ""}
-            self._drones_on = bool(setup.get("ok"))
-            if setup.get("note"):
-                self._say("drone", f"【自主】{setup.get('note')}", every=1)
+            # 无人机布置默认禁用：TrySpawnOneDrone 生成的无人机缺初始化(电池/区域注册)，
+            # 每帧 NRE 且炸掉 RegionRegistry 序列化——存档写不出(2026-10-18 实机)。
+            # 待 drone_setup 完整复刻游戏创建流程后再默认启用。
+            self._drones_on = (bool(getattr(self.s, "enable_drones", False))
+                               and hasattr(self.io, "drone_setup")
+                               and bool(self.io.drone_setup().get("ok")))
+            if self._drones_on:
+                self._say("drone", "【自主】无人机搬运已启用（实验）", every=1)
         if self._drones_on:
             if self.ticks % 5 == 4:
                 self._infra_step()
