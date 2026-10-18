@@ -2226,8 +2226,9 @@ namespace SlimeBridge
                 : "围栏地上/收集器都没有结晶，在市场门口等待";
         }
 
-        // 主线程执行：瞬移到该围栏前收取（有收集器取储存槽/没有收集器捡地上），
-        // 返回收到数量；物品栏满 full=true；usedCollector 报告走的是哪条路径。
+        // 主线程执行：瞬移到该围栏前收取。有收集器：取其储存槽 + 按启动钮（让收集器
+        // 以后把地上结晶吸进槽里）+ 同样捡地上还没被吸走的；没有收集器：只捡地上。
+        // 返回收到总数；物品栏满 full=true；usedCollector 报告是否有收集器。
         private int CollectOneCorral(LandPlot plot, object playerAmmo, ref int skippedFull, out bool full, out bool usedCollector)
         {
             full = false;
@@ -2240,9 +2241,37 @@ namespace SlimeBridge
             }
             catch (Exception) { }
             usedCollector = pc != null;
+            int taken = 0;
             if (pc != null)
-                return DrainCollector(pc, playerAmmo, plot.transform.position, ref skippedFull, out full);
-            return CollectGroundPlorts(plot.transform.position, playerAmmo, ref skippedFull, out full);
+            {
+                // 储存槽里有就取（收集器-1，物品栏+1）
+                taken += DrainCollector(pc, playerAmmo, plot.transform.position, ref skippedFull, out full);
+                // 按下收集器启动钮：游戏里就是那个绿色按钮，按了它才开始把地上结晶
+                // 吸进储存槽（下轮循环就能从槽里取）。有冷却时间，按不动就算了。
+                TryActivateCollector(plot);
+            }
+            // 无论有没有收集器：地上还没被吸走的结晶都捡（物品栏+1，地上消失）。
+            // 2026-10-18 修复：旧版有收集器的围栏只取储存槽，收集器没启动时结晶
+            // 全躺在地上却永远没人捡。
+            if (!full)
+            {
+                bool full2;
+                taken += CollectGroundPlorts(plot.transform.position, playerAmmo, ref skippedFull, out full2);
+                full = full || full2;
+            }
+            return taken;
+        }
+
+        // 按收集器启动钮（PlortCollectorActivator.Activate）：让它开始把围栏地上的
+        // 结晶吸进储存槽。带冷却保护，重复按没有副作用。
+        private void TryActivateCollector(LandPlot plot)
+        {
+            try
+            {
+                var acts = plot.GetComponentsInChildren<PlortCollectorActivator>(true);
+                if (acts != null && acts.Length > 0) acts[0].Activate();
+            }
+            catch (Exception e) { UMFLog.Log("[SlimeBridge] activate collector err: " + e.Message); }
         }
 
         // 按距离玩家排序的全部围栏（与 FindCorralByIndex 同序，corral@N 下标一致）
