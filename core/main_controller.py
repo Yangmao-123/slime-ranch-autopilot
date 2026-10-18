@@ -26,7 +26,7 @@ from core.bridge import BridgeIOController  # noqa: E402
 from core.real import WalkCaptureIO  # noqa: E402
 from core.ranch import RanchState, decide_build_action, FACILITY_NAMES, record_built  # noqa: E402
 from core.voice import HotkeyListener  # noqa: E402
-from core.names import SLIME_NAMES, RARE_SLIMES, plort_id_from_text  # noqa: E402
+from core.names import SLIME_NAMES, RARE_SLIMES, plort_id_from_text, display_name  # noqa: E402
 
 # 真实购买菜单的按钮关键词（中英双语：SR1 界面文字跟游戏语言走）。
 # 建造菜单(空地块购买页)三个按钮文字大致为 Corral/Coop/Garden 或 围栏/鸡舍/菜园。
@@ -227,13 +227,12 @@ class Brain:
             if self.ticks % 5 == 4:
                 self._infra_step()
             return
-        # 2026-10-18 需求（第二轮）：完全指令驱动——玩家说卖哪种结晶之前**不收集**。
-        # 待命态：人停在结晶市场等指令；收到售卖指令后才瞬移围栏收集→回市场卖出。
+        # 2026-10-18 需求（第三轮）：完全指令驱动且按种类收——待命态在结晶市场
+        # 【原地不动】（不收集不建造）；玩家说卖哪种结晶，才瞬移围栏收集【该种】
+        # 再回市场卖出（corral_collect 传结晶 Id 过滤）。
         self._say("wait-market",
                   "【自主】在结晶市场待命；要卖哪种结晶直接说（例：卖粉色结晶 / 卖全部结晶），"
-                  "我这就去收来卖～", every=10)
-        if self.ticks % 5 == 4:
-            self._infra_step()
+                  "我这就去收那种结晶来卖～", every=10)
 
     # ------------------------------------------------------------ 观望：周边感知
     def _watch_tick(self) -> None:
@@ -522,9 +521,9 @@ class Brain:
             self.c.say("【售卖】没听懂「" + (what or "") + "」是哪种结晶。"
                        "可以说：卖粉色结晶、卖荧光结晶……或者 卖全部结晶")
             return
-        # 1) 先去围栏收集（说卖之前不收集——指令到了才动）
-        self._say("sell-collect", "【售卖】收到！先去围栏收集结晶，马上回来卖～", every=1)
-        collected = self.walk.collect_plorts_here()
+        # 1) 先去围栏收集【该种】结晶（说卖之前不收集、也不收集别的种类）
+        self._say("sell-collect", "【售卖】收到！先去围栏收集" + (display_name(pid) if pid else "全部") + "，马上回来卖～", every=1)
+        collected = self.walk.collect_plorts_here(pid)
         collect_note = str(collected.get("note", ""))
         # 2) 回结晶市场按指令卖出
         res = self.walk.sell_kind(pid)

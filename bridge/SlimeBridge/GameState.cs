@@ -2210,6 +2210,8 @@ namespace SlimeBridge
         //   ——玩家物品栏 +1，收集器槽位 -1，直到收集器清空或物品栏满。
         // 没有收集器的围栏：瞬移到围栏前，收集围栏范围内的地上结晶
         //   ——物品栏 +1，地上结晶对应消失（Vacuumable.TryConsume 原生路径）。
+        // kind 语义：""=全部围栏全部结晶；"corral@N"=第 N 个围栏的全部结晶；
+        // 结晶 Id(如 PINK_PLORT)=全部围栏但只收该种（玩家说卖哪种才收哪种）。
         private void CorralCollectReal(string kind, ActionResult ar)
         {
             EnsureScene();
@@ -2217,6 +2219,17 @@ namespace SlimeBridge
             object playerAmmo = PlayerAmmo();
             bool indexed = kind != null && kind.StartsWith("corral@");
             int wantIdx = CorralIndex(kind);
+            Identifiable.Id? filter = null;
+            if (!indexed && !string.IsNullOrEmpty(kind))
+            {
+                try
+                {
+                    Identifiable.Id kid = (Identifiable.Id)System.Enum.Parse(typeof(Identifiable.Id), kind, true);
+                    if (PLORT_IDS.Contains(kid)) filter = kid;
+                }
+                catch (Exception) { }
+                if (filter == null) { ar.ok = false; ar.note = "不认识的结晶种类: " + kind; return; }
+            }
             int fromCollector = 0, fromGround = 0, skippedFull = 0;
             var detail = new System.Text.StringBuilder();
             int ci = 0;
@@ -2225,7 +2238,7 @@ namespace SlimeBridge
                 int idx = ci; ci++;
                 if (indexed && idx != wantIdx) continue;
                 bool full, usedCollector;
-                int taken = CollectOneCorral(plot, playerAmmo, ref skippedFull, out full, out usedCollector);
+                int taken = CollectOneCorral(plot, playerAmmo, ref skippedFull, out full, out usedCollector, filter);
                 if (taken > 0)
                 {
                     if (usedCollector) fromCollector += taken; else fromGround += taken;
@@ -2236,16 +2249,18 @@ namespace SlimeBridge
             int total = fromCollector + fromGround;
             if (total == 0)
             {
-                // 地上/收集器都没有结晶：回到市场门口待命（下一轮结晶产出后再来收）。
+                // 没收到（该种）结晶：回到市场门口待命（等玩家下一条指令）。
                 bool atMarket = TeleportToMarketStand();
                 ar.ok = false;
-                ar.note = "围栏里没有可收的结晶" + (skippedFull > 0 ? "（物品栏满，跳过 " + skippedFull + " 个）" : "")
-                          + (atMarket ? "，已在市场门口等待" : "");
+                ar.note = (filter == null ? "围栏里没有可收的结晶" : ("围栏里没有 " + filter + " 可收"))
+                          + (skippedFull > 0 ? "（物品栏满，跳过 " + skippedFull + " 个）" : "")
+                          + (atMarket ? "，已回市场门口等待" : "");
                 return;
             }
             ar.ok = true;
             ar.count = total;
-            ar.note = "围栏收结晶：收集器 " + fromCollector + " 个 + 地上 " + fromGround
+            ar.note = (filter == null ? "围栏收结晶" : ("已按指令收集 " + filter))
+                      + "：收集器 " + fromCollector + " 个 + 地上 " + fromGround
                       + " 个（" + detail.ToString() + "）"
                       + (skippedFull > 0 ? "，物品栏满跳过 " + skippedFull + " 个" : "");
         }
@@ -2279,7 +2294,7 @@ namespace SlimeBridge
                     {
                         bool full, usedCollector;
                         int sk = 0;
-                        int g = CollectOneCorral(plot, playerAmmo, ref sk, out full, out usedCollector);
+                        int g = CollectOneCorral(plot, playerAmmo, ref sk, out full, out usedCollector, null);
                         res[0] = g;
                         res[1] = full ? 1 : 0;
                     });
@@ -2324,8 +2339,9 @@ namespace SlimeBridge
 
         // 主线程执行：瞬移到该围栏前收取。有收集器：取其储存槽 + 按启动钮（让收集器
         // 以后把地上结晶吸进槽里）+ 同样捡地上还没被吸走的；没有收集器：只捡地上。
+        // filter 非空只收该种结晶（玩家说卖哪种才收哪种）。
         // 返回收到总数；物品栏满 full=true；usedCollector 报告是否有收集器。
-        private int CollectOneCorral(LandPlot plot, object playerAmmo, ref int skippedFull, out bool full, out bool usedCollector)
+        private int CollectOneCorral(LandPlot plot, object playerAmmo, ref int skippedFull, out bool full, out bool usedCollector, Identifiable.Id? filter)
         {
             full = false;
             StandAt(plot.transform.position);   // 人出现在围栏前（画面可见）
@@ -2341,7 +2357,7 @@ namespace SlimeBridge
             if (pc != null)
             {
                 // 储存槽里有就取（收集器-1，物品栏+1）
-                taken += DrainCollector(pc, playerAmmo, plot.transform.position, ref skippedFull, out full);
+                taken += DrainCollector(pc, playerAmmo, plot.transform.position, ref skippedFull, out full, filter);
                 // 按下收集器启动钮：游戏里就是那个绿色按钮，按了它才开始把地上结晶
                 // 吸进储存槽（下轮循环就能从槽里取）。有冷却时间，按不动就算了。
                 TryActivateCollector(plot);
@@ -2352,7 +2368,7 @@ namespace SlimeBridge
             if (!full)
             {
                 bool full2;
-                taken += CollectGroundPlorts(plot.transform.position, playerAmmo, ref skippedFull, out full2);
+                taken += CollectGroundPlorts(plot.transform.position, playerAmmo, ref skippedFull, out full2, filter);
                 full = full || full2;
             }
             return taken;
@@ -2392,7 +2408,7 @@ namespace SlimeBridge
 
         // 收集器取物：storage 是私有 SiloStorage，内含自己的 Ammo。逐个：
         // MaybeAddToSlot 入玩家物品栏(+1)，成功后收集器 Decrement(id,1)(-1)。
-        private int DrainCollector(PlortCollector pc, object playerAmmo, Vector3 atPos, ref int skippedFull, out bool full)
+        private int DrainCollector(PlortCollector pc, object playerAmmo, Vector3 atPos, ref int skippedFull, out bool full, Identifiable.Id? filter)
         {
             full = false;
             int taken = 0;
@@ -2414,6 +2430,7 @@ namespace SlimeBridge
                     if (!(idObj is Identifiable.Id)) continue;
                     Identifiable.Id sid = (Identifiable.Id)idObj;
                     if (sid == Identifiable.Id.NONE || !PLORT_IDS.Contains(sid)) continue;
+                    if (filter.HasValue && sid != filter.Value) continue;   // 只收玩家指定的种类
                     object cObj = AmmoCall(siloAmmo, "GetSlotCount", new object[] { i });
                     int cnt = cObj is int ? (int)cObj : 0;
                     for (int n = 0; n < cnt; n++)
@@ -2455,8 +2472,8 @@ namespace SlimeBridge
             catch (Exception) { return false; }
         }
 
-        // 地上结晶：plot 中心半径 12m 内全部结晶逐个入栏并原生消失
-        private int CollectGroundPlorts(Vector3 center, object playerAmmo, ref int skippedFull, out bool full)
+        // 地上结晶：plot 中心半径 12m 内全部结晶逐个入栏并原生消失（filter 非空只收该种）
+        private int CollectGroundPlorts(Vector3 center, object playerAmmo, ref int skippedFull, out bool full, Identifiable.Id? filter)
         {
             full = false;
             var cands = new List<Identifiable>();
@@ -2466,6 +2483,7 @@ namespace SlimeBridge
                 {
                     if (idf == null || idf.gameObject == null) continue;
                     if (!PLORT_IDS.Contains(idf.id)) continue;
+                    if (filter.HasValue && idf.id != filter.Value) continue;   // 只收玩家指定的种类
                     if (Vector3.Distance(center, idf.transform.position) > 12f) continue;
                     if (idf.GetComponent<Vacuumable>() == null) continue;
                     cands.Add(idf);

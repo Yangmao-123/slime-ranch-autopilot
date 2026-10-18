@@ -574,16 +574,13 @@ class WalkCaptureIO:
             note += "。已售出，收入 $" + str(sold.get("gains", 0))
         return {"ok": bool(got.get("ok")), "note": note}
 
-    def collect_plorts_here(self) -> Dict[str, Any]:
-        """瞬移到每个围栏前收结晶（2026-10-18 取代收食物+投喂）。
-
-        有结晶收集器升级的围栏：从收集器储存槽取出——物品栏 +1、收集器 -1。
-        没有收集器的围栏：收集围栏范围内地上结晶——物品栏 +1、地上对应消失。
-        全部围栏一次完成，mod 端自动检测升级状态。
-        """
+    def collect_plorts_here(self, kind: str = "") -> Dict[str, Any]:
+        """瞬移到每个围栏前收结晶（kind 空=全部；传结晶 Id 只收该种——玩家说卖
+        哪种才收哪种）。有收集器取储存槽+按启动钮+捡地上，没有收集器捡地上。
+        全部围栏一次完成，mod 端自动检测升级状态。"""
         self._dismiss_if_paused()
         if hasattr(self.io, "corral_collect"):
-            res = self.io.corral_collect("")
+            res = self.io.corral_collect(kind or "")
             return {"ok": bool(res.get("ok")), "count": res.get("count", 0),
                     "note": res.get("note", "")}
         # 旧版 mod 兜底：逐个瞬移吸取结晶
