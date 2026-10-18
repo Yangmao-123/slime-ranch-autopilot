@@ -514,6 +514,18 @@ namespace SlimeBridge
             lock (_lock)
             {
                 var ar = new ActionResult { strategy = strategy };
+                // 长流程动作用 HTTP 线程编排（每个游戏操作单独 RunOnMain 上主线程，
+                // 节奏休眠留在 HTTP 线程），否则主线程 Sleep 会把游戏冻住。
+                if (action == "ranch_cycle" || action == "market_sell_all")
+                {
+                    try
+                    {
+                        if (action == "ranch_cycle") RanchCycleReal(ar);
+                        else MarketSellAllReal(ar);
+                    }
+                    catch (Exception e) { ar.ok = false; ar.note = "执行异常: " + e.Message; }
+                    return ar;
+                }
                 RunOnMain(() =>
                 {
                     try
@@ -542,6 +554,7 @@ namespace SlimeBridge
                             case "scan_market": ScanMarketReal(ar); break;
                             case "scan_food": ScanFoodReal(ar); break;
                             case "scan_plort": ScanPlortReal(ar); break;
+                            case "scan_near": ScanNearReal(kind, ar); break;
                             case "scan_plot": ScanPlotReal(kind, ar); break;
                             case "scan_facilities": ScanFacilitiesReal(ar); break;
                             case "ui_buttons": UiButtonsReal(ar); break;
@@ -550,8 +563,12 @@ namespace SlimeBridge
                             case "tp_market": TeleportMarketReal(ar); break;
                             case "tp_plot": TeleportPlotReal(kind, ar); break;
                             case "tp_item": TeleportItemReal(kind, ar); break;
-                            case "feed_show": FeedShowReal(ar); break;
+                            case "feed_show": FeedShowReal(kind, ar); break;
                             case "drone_setup": DroneSetupReal(ar); break;
+                            case "cleanup_drones": CleanupDronesReal(ar); break;
+                            case "market_sell_all": MarketSellAllReal(ar); break;
+                            case "corral_collect": CorralCollectReal(kind, ar); break;
+                            case "ranch_cycle": break;   // 已在分发旁路处理（HTTP 线程编排）
                             case "debug_types": DebugTypesReal(kind, ar); break;
                             case "debug_cams": DebugCamsReal(ar); break;
                             case "debug_members": DebugMembersReal(kind, ar); break;
@@ -1487,6 +1504,82 @@ namespace SlimeBridge
             ar.note = sb.ToString();
         }
 
+        // ---- 周边感知（观望模式的"新发现"）：一次返回玩家 radius 内 ----
+        // 史莱姆(含稀有金/幸运/水银)/结晶/食物 按 Id 计数 + 当前区域名，payload 为 JSON。
+        private static readonly HashSet<Identifiable.Id> NEAR_SLIME_IDS = new HashSet<Identifiable.Id>
+        {
+            Identifiable.Id.PINK_SLIME, Identifiable.Id.ROCK_SLIME, Identifiable.Id.TABBY_SLIME,
+            Identifiable.Id.PHOSPHOR_SLIME, Identifiable.Id.RAD_SLIME, Identifiable.Id.BOOM_SLIME,
+            Identifiable.Id.CRYSTAL_SLIME, Identifiable.Id.HONEY_SLIME, Identifiable.Id.HUNTER_SLIME,
+            Identifiable.Id.PUDDLE_SLIME, Identifiable.Id.QUANTUM_SLIME, Identifiable.Id.DERVISH_SLIME,
+            Identifiable.Id.MOSAIC_SLIME, Identifiable.Id.TANGLE_SLIME, Identifiable.Id.FIRE_SLIME,
+            Identifiable.Id.SABER_SLIME,
+            Identifiable.Id.GOLD_SLIME, Identifiable.Id.LUCKY_SLIME, Identifiable.Id.QUICKSILVER_SLIME,
+        };
+
+        private void ScanNearReal(string kind, ActionResult ar)
+        {
+            EnsureScene();
+            if (_player == null) { ar.ok = false; ar.note = "未进入存档"; return; }
+            float radius = 0f;
+            float.TryParse(kind, NumberStyles.Float, CultureInfo.InvariantCulture, out radius);
+            if (radius <= 0f) radius = 30f;
+            Vector3 p = _player.transform.position;
+            var slimes = new Dictionary<Identifiable.Id, int>();
+            var plorts = new Dictionary<Identifiable.Id, int>();
+            var foods = new Dictionary<Identifiable.Id, int>();
+            try
+            {
+                foreach (var idf in UnityEngine.Object.FindObjectsOfType<Identifiable>())
+                {
+                    if (idf == null || idf.gameObject == null) continue;
+                    Identifiable.Id id = idf.id;
+                    if (id == Identifiable.Id.NONE) continue;
+                    if (Vector3.Distance(p, idf.transform.position) > radius) continue;
+                    if (NEAR_SLIME_IDS.Contains(id)) AddOne(slimes, id);
+                    else if (PLORT_IDS.Contains(id)) AddOne(plorts, id);
+                    else if (IsFood(id)) AddOne(foods, id);
+                }
+            }
+            catch (Exception e) { ar.ok = false; ar.note = "扫描异常: " + e.Message; return; }
+            var sb = new System.Text.StringBuilder();
+            sb.Append("{\"zone\":\"").Append(ZoneToName(CurrentZone())).Append("\"");
+            AppendIdCounts(sb, "slimes", slimes);
+            AppendIdCounts(sb, "plorts", plorts);
+            AppendIdCounts(sb, "foods", foods);
+            sb.Append("}");
+            ar.ok = true;
+            ar.area = ZoneToName(CurrentZone());
+            ar.count = TotalOf(slimes) + TotalOf(plorts) + TotalOf(foods);
+            ar.note = "附近扫描：史莱姆" + TotalOf(slimes) + " 结晶" + TotalOf(plorts) + " 食物" + TotalOf(foods) + " 区域=" + ar.area;
+            ar.payload = sb.ToString();
+        }
+
+        private static void AddOne(Dictionary<Identifiable.Id, int> dict, Identifiable.Id id)
+        {
+            dict[id] = dict.ContainsKey(id) ? dict[id] + 1 : 1;
+        }
+
+        private static int TotalOf(Dictionary<Identifiable.Id, int> dict)
+        {
+            int n = 0;
+            foreach (var v in dict.Values) n += v;
+            return n;
+        }
+
+        private static void AppendIdCounts(System.Text.StringBuilder sb, string key, Dictionary<Identifiable.Id, int> dict)
+        {
+            sb.Append(",\"").Append(key).Append("\":[");
+            bool first = true;
+            foreach (var kv in dict)
+            {
+                if (!first) sb.Append(',');
+                first = false;
+                sb.Append("{\"id\":\"").Append(kv.Key).Append("\",\"n\":").Append(kv.Value).Append('}');
+            }
+            sb.Append(']');
+        }
+
         // ---- 结晶市场定位（真实：纯只读，供 core 真实走到市场投出结晶换钱）----
         // 结晶市场是牧场里的固定建筑：玩家把真空背包里的结晶对准投入口投出，立即换成钱。
         // 市场位置不变，扫描一次后缓存（_cachedMarket），之后每步 scan_market 只用缓存的
@@ -1557,10 +1650,10 @@ namespace SlimeBridge
                 Vector3 forward = AimForward();
                 ar.px = p.x; ar.py = p.z;
                 Vector3 flatF = forward; flatF.y = 0f;
-                // 站位点：投入口开孔 + 朝庭院方向 * 14m（站在庭院里面对开孔，可把结晶投进去）
+                // 站位点：投入口开孔 + 朝庭院方向 * 3.5m，高度取投入口同层（市场平台层）
                 Vector3 port = _cachedMarket.Value;
-                Vector3 stand = port + _cachedStandDir * 14f;
-                stand.y = p.y;
+                Vector3 stand = port + _cachedStandDir * 3.5f;
+                stand.y = port.y;   // 与 tp_market 一致；旧版沿用玩家当前高度会停在平台下面
                 Vector3 toStand = stand - p; toStand.y = 0f;
                 float standDist = Vector3.Distance(p, stand);
                 float standYaw = (toStand.sqrMagnitude < 0.0001f || flatF.sqrMagnitude < 0.0001f)
@@ -1591,30 +1684,35 @@ namespace SlimeBridge
         {
             EnsureScene();
             if (_player == null) { ar.ok = false; ar.note = "未进入存档"; return; }
-            try
+            if (!TeleportToMarketStand()) { ar.ok = false; ar.note = "场景中找不到结晶市场"; return; }
+            ar.ok = true;
+            ar.area = "牧场";
+            ar.note = "已瞬移到结晶市场投入口前";
+        }
+
+        // 瞬移到结晶市场站位：投入口开孔同高（市场平台层）+ 朝庭院 3.5m，面向投入口。
+        // 旧版站位沿用玩家当前高度，从牧场低处瞬移会停在市场平台下面（高度偏差的根因）。
+        private bool TeleportToMarketStand()
+        {
+            if (_player == null) return false;
+            if (_cachedMarket == null && !_marketFailed)
             {
-                if (_cachedMarket == null && !_marketFailed)
-                {
-                    _cachedMarket = FindMarketPos();
-                    if (_cachedMarket == null) _marketFailed = true;
-                }
-                if (_cachedMarket == null) { ar.ok = false; ar.note = "场景中找不到结晶市场"; return; }
-                Vector3 port = _cachedMarket.Value;
-                Vector3 stand = port + _cachedStandDir * 3.5f;
-                stand.y = _player.transform.position.y;
-                Vector3 look = port - stand;
-                look.y = 0f;
-                RunOnMain(() =>
-                {
-                    _player.transform.position = stand + Vector3.up * 0.5f;
-                    if (look.sqrMagnitude > 0.01f)
-                        _player.transform.rotation = Quaternion.LookRotation(look.normalized);
-                });
-                ar.ok = true;
-                ar.area = "牧场";
-                ar.note = "已瞬移到结晶市场前";
+                _cachedMarket = FindMarketPos();
+                if (_cachedMarket == null) _marketFailed = true;
             }
-            catch (Exception e) { ar.ok = false; ar.note = "传送到市场失败: " + e.Message; }
+            if (_cachedMarket == null) return false;
+            Vector3 port = _cachedMarket.Value;
+            Vector3 stand = port + _cachedStandDir * 3.5f;
+            stand.y = port.y;   // 市场平台层（投入口开孔就开在平台地板上）
+            Vector3 look = port - stand;
+            look.y = 0f;
+            RunOnMain(() =>
+            {
+                _player.transform.position = stand + Vector3.up * 0.5f;
+                if (look.sqrMagnitude > 0.01f)
+                    _player.transform.rotation = Quaternion.LookRotation(look.normalized);
+            });
+            return true;
         }
 
         // 把玩家放到地块跟前并转向它，让购买/投喂发生在镜头里。
@@ -1658,22 +1756,153 @@ namespace SlimeBridge
             ar.note = "已瞬移到" + (kind == "plort" ? "结晶" : "食物") + "旁边";
         }
 
-        // 站到围栏前。能写进喂食器就放一份胡萝卜，写不进也保持站位，交给键鼠做出投喂动作。
-        private void FeedShowReal(ActionResult ar)
+        private int CorralIndex(string kind)
+        {
+            int index = 0;
+            if (string.IsNullOrEmpty(kind)) return 0;
+            int at = kind.IndexOf('@');
+            if (at >= 0) int.TryParse(kind.Substring(at + 1), out index);
+            return index;
+        }
+
+        private LandPlot FindCorralByIndex(int index, out int count)
+        {
+            var hits = new List<LandPlot>();
+            foreach (var lp in UnityEngine.Object.FindObjectsOfType<LandPlot>())
+            {
+                if (lp == null) continue;
+                LandPlotModel m = PlotModelOf(lp);
+                if (m != null && m.typeId == LandPlot.Id.CORRAL) hits.Add(lp);
+            }
+            Vector3 p = _player != null ? _player.transform.position : Vector3.zero;
+            hits.Sort(delegate(LandPlot a, LandPlot b)
+            {
+                float da = Vector3.Distance(p, a.transform.position);
+                float db = Vector3.Distance(p, b.transform.position);
+                return da.CompareTo(db);
+            });
+            count = hits.Count;
+            if (count == 0) return null;
+            if (index < 0) index = 0;
+            return hits[index % count];
+        }
+
+        private List<Identifiable.Id> FoodsFor(SlimeDefinition def)
+        {
+            var list = new List<Identifiable.Id>();
+            if (def == null || def.Diet == null) return list;
+            if (def.Diet.Favorites != null)
+            {
+                foreach (var id in def.Diet.Favorites)
+                    if (IsFood(id) && !list.Contains(id)) list.Add(id);
+            }
+            if (def.Diet.MajorFoodGroups != null)
+            {
+                foreach (var g in def.Diet.MajorFoodGroups)
+                {
+                    Identifiable.Id staple = StapleFood(g);
+                    if (staple != Identifiable.Id.NONE && !list.Contains(staple)) list.Add(staple);
+                }
+            }
+            if (def.Diet.AdditionalFoods != null)
+            {
+                foreach (var id in def.Diet.AdditionalFoods)
+                    if (IsFood(id) && !list.Contains(id)) list.Add(id);
+            }
+            return list;
+        }
+
+        private static Identifiable.Id StapleFood(SlimeEat.FoodGroup group)
+        {
+            string name = group.ToString();
+            if (name == "VEGGIES") return Identifiable.Id.CARROT_VEGGIE;
+            if (name == "FRUIT") return Identifiable.Id.POGO_FRUIT;
+            if (name == "MEAT") return Identifiable.Id.BRIAR_HEN;
+            return Identifiable.Id.NONE;
+        }
+
+        // 看这一栏里的史莱姆食性，选出它们都吃的一种食物。最爱优先，否则用蔬菜/水果/肉的常备食物。
+        private Identifiable.Id FoodForCorral(string kind, out string note)
+        {
+            note = "";
+            int count;
+            LandPlot plot = FindCorralByIndex(CorralIndex(kind), out count);
+            if (plot == null) { note = "没有围栏"; return Identifiable.Id.NONE; }
+            var defs = new List<SlimeDefinition>();
+            var names = new List<string>();
+            Vector3 center = plot.transform.position;
+            SlimeDefinitions catalog = null;
+            try
+            {
+                var ctx = SRSingleton<GameContext>.Instance;
+                if (ctx != null) catalog = ctx.SlimeDefinitions;
+            }
+            catch (Exception) { }
+            foreach (var idf in UnityEngine.Object.FindObjectsOfType<Identifiable>())
+            {
+                if (idf == null || idf.gameObject == null) continue;
+                if ((idf.transform.position - center).sqrMagnitude > 64f) continue;
+                string n = idf.id.ToString();
+                if (n.IndexOf("SLIME", StringComparison.Ordinal) < 0 && n.IndexOf("LARGO", StringComparison.Ordinal) < 0) continue;
+                SlimeDefinition def = null;
+                var eat = idf.GetComponent<SlimeEat>();
+                if (eat != null) def = eat.slimeDefinition;
+                if (def == null && catalog != null) def = catalog.GetSlimeByIdentifiableId(idf.id);
+                if (def == null) continue;
+                bool seen = false;
+                for (int i = 0; i < defs.Count; i++)
+                    if (defs[i].IdentifiableId == def.IdentifiableId) seen = true;
+                if (seen) continue;
+                defs.Add(def);
+                names.Add(def.IdentifiableId.ToString());
+            }
+            if (defs.Count == 0) { note = "这个围栏里没有史莱姆"; return Identifiable.Id.NONE; }
+            List<Identifiable.Id> common = FoodsFor(defs[0]);
+            for (int i = 1; i < defs.Count; i++)
+            {
+                var next = FoodsFor(defs[i]);
+                var keep = new List<Identifiable.Id>();
+                foreach (var id in common)
+                    if (next.Contains(id)) keep.Add(id);
+                common = keep;
+            }
+            string who = string.Join("/", names.ToArray());
+            if (common.Count == 0)
+            {
+                var any = FoodsFor(defs[0]);
+                if (any.Count == 0) { note = who + " 没有对应的固体食物"; return Identifiable.Id.NONE; }
+                note = who + " 食性不完全一样，先喂 " + any[0];
+                return any[0];
+            }
+            note = who + " 吃 " + common[0];
+            return common[0];
+        }
+
+        // 站到指定围栏前，按栏里史莱姆的食性把对应食物放进喂食器。
+        private void FeedShowReal(string kind, ActionResult ar)
         {
             EnsureScene();
-            LandPlot plot = FindPlotOfKind("corral");
+            int count;
+            LandPlot plot = FindCorralByIndex(CorralIndex(string.IsNullOrEmpty(kind) ? "corral@0" : kind), out count);
             if (plot == null || _player == null)
             {
                 ar.ok = false;
                 ar.note = "没有围栏，无法投喂";
                 return;
             }
+            string dietNote;
+            Identifiable.Id foodId = FoodForCorral(string.IsNullOrEmpty(kind) ? "corral@0" : kind, out dietNote);
             RunOnMain(() => StandAt(plot.transform.position));
+            if (foodId == Identifiable.Id.NONE)
+            {
+                ar.ok = false;
+                ar.note = dietNote;
+                return;
+            }
             try
             {
                 var flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic;
-                object foodId = Enum.Parse(typeof(Identifiable.Id), "CARROT_VEGGIE");
+                object foodObj = foodId;
                 foreach (var c in plot.GetComponentsInChildren<Component>(true))
                 {
                     if (c == null) continue;
@@ -1691,7 +1920,7 @@ namespace SlimeBridge
                         if (sig.Length > 0) sig.Append(",");
                         sig.Append(p.ParameterType.Name);
                     }
-                    object[] args = ps.Length >= 2 ? new object[] { foodId, null } : new object[] { foodId };
+                    object[] args = ps.Length >= 2 ? new object[] { foodObj, null } : new object[] { foodObj };
                     if (ps.Length >= 3) args = new object[] { foodId, null, 6 };
                     Exception invokeErr = null;
                     RunOnMain(() =>
@@ -1706,7 +1935,7 @@ namespace SlimeBridge
                         return;
                     }
                     ar.ok = true;
-                    ar.note = "已站在围栏前，MaybeAddToSlot(" + sig + ") 已写入喂食器";
+                    ar.note = dietNote + "。MaybeAddToSlot(" + sig + ") 已写入喂食器";
                     return;
                 }
             }
@@ -1842,6 +2071,411 @@ namespace SlimeBridge
         // 给牧场上的无人机写搬运程序。没有无人机时尝试放一台。
         // 程序槽的真实字段要等活体无人机才能完全对上，这里按侦察到的
         // DroneProgramV01{target,source,destination} 和 Source/Destination 类型名去写。
+        // ---- 清除场上全部无人机（修复残废无人机破坏存档）----
+        // TrySpawnOneDrone 生成的无人机缺初始化(电池/区域注册)，每帧 NRE 且炸掉
+        // RegionRegistry 序列化导致存档失败。此动作销毁场上所有 DroneGadget/站桩，
+        // 之后 save_now 即可保存出干净档。
+        private void CleanupDronesReal(ActionResult ar)
+        {
+            EnsureScene();
+            if (_player == null) { ar.ok = false; ar.note = "未进入存档"; return; }
+            int n = 0;
+            try
+            {
+                var gadgets = UnityEngine.Object.FindObjectsOfType<DroneGadget>();
+                if (gadgets != null)
+                {
+                    foreach (var g in gadgets)
+                    {
+                        if (g == null) continue;
+                        var go = g.gameObject;
+                        try { RunOnMain(() => g.OnUserDestroyed()); }
+                        catch (Exception) { }
+                        try { RunOnMain(() => UnityEngine.Object.Destroy(go)); } catch (Exception) { }
+                        n++;
+                    }
+                }
+                var stations = UnityEngine.Object.FindObjectsOfType<DroneStation>();
+                if (stations != null)
+                {
+                    foreach (var st in stations)
+                    {
+                        if (st == null) continue;
+                        var go = st.gameObject;
+                        try { RunOnMain(() => st.RequestDestroy("cleanup")); }
+                        catch (Exception) { }
+                        try { RunOnMain(() => UnityEngine.Object.Destroy(go)); } catch (Exception) { }
+                        n++;
+                    }
+                }
+            }
+            catch (Exception e) { ar.ok = false; ar.note = "清理异常: " + e.Message; return; }
+            ar.ok = true;
+            ar.count = n;
+            ar.note = n > 0 ? ("已清除 " + n + " 个无人机对象，请立刻保存存档")
+                             : "场上没有无人机，无需清理";
+        }
+
+        // 市场批量清仓（2026-10-18 用户规则）：按结晶市场当日价格，物品栏里每减 1 个
+        // 结晶就给玩家 +当日单价，循环到物品栏结晶为 0。逐个 RegisterSold 进游戏经济
+        // 系统（市价与饱和度真实变化），每件间隔 0.12s 让资金读数一格一格往上涨。
+        // HTTP 线程编排：单件结算 RunOnMain 上主线程，休眠在 HTTP 线程，不冻结游戏。
+        private void MarketSellAllReal(ActionResult ar)
+        {
+            RunOnMain(() => EnsureScene());
+            if (_player == null) { ar.ok = false; ar.note = "未进入存档"; return; }
+            object ammoL = RunOnMain(() => PlayerAmmo());
+            if (ammoL == null) { ar.ok = false; ar.note = "真实物品栏不可用"; return; }
+            var lines = new System.Text.StringBuilder();
+            int units, value;
+            SellAllFromAmmo(ammoL, out units, out value, lines);
+            if (units == 0) { ar.ok = false; ar.note = "物品栏里没有结晶可卖"; return; }
+            ar.ok = true;
+            ar.gains = value;
+            ar.count = units;
+            ar.note = "结晶市场清仓：" + units + " 个结晶共 $" + value + "（" + lines.ToString()
+                      + "），当前资金 $" + RunOnMain(() => ReadMoneyReal());
+        }
+
+        // 批量结算主体（HTTP 线程）：遍历全部结晶 Id，逐件 当日市价+RegisterSold+
+        // 加钱+扣物品栏，0.12s/件，直到物品栏结晶清零。明细写进 lines。
+        private void SellAllFromAmmo(object ammoL, out int unitsOut, out int valueOut, System.Text.StringBuilder lines)
+        {
+            unitsOut = 0;
+            valueOut = 0;
+            EconomyDirector[] econ = RunOnMain(() => UnityEngine.Object.FindObjectsOfType<EconomyDirector>());
+            foreach (Identifiable.Id pid in PLORT_IDS)
+            {
+                object hL = RunOnMain(() => AmmoCall(ammoL, "GetCount", new object[] { pid }));
+                int cnt = hL is int ? (int)hL : 0;
+                if (cnt <= 0) continue;
+                int unitSum = 0, sold = 0;
+                for (int i = 0; i < cnt; i++)
+                {
+                    int price = RunOnMain(() => SellOneUnit(econ, ammoL, pid));
+                    if (price <= 0) break;   // 物品栏异常变动，停
+                    unitSum += price;
+                    sold++;
+                    System.Threading.Thread.Sleep(120);   // 资金一格一格涨（HTTP 线程休眠不冻结游戏）
+                }
+                if (sold <= 0) continue;
+                unitsOut += sold;
+                valueOut += unitSum;
+                if (lines.Length > 0) lines.Append("，");
+                lines.Append(pid).Append("×").Append(sold).Append("=$").Append(unitSum);
+            }
+        }
+
+        // 主线程：卖出 1 个结晶（当日市价 + 饱和登记 + 加钱 + 物品栏-1），返回结算单价。
+        private int SellOneUnit(EconomyDirector[] econ, object ammoL, Identifiable.Id pid)
+        {
+            int price = 0;
+            try
+            {
+                if (econ != null && econ.Length > 0)
+                {
+                    float? v = econ[0].GetCurrValue(pid);
+                    price = Mathf.RoundToInt(v ?? 0);
+                    econ[0].RegisterSold(pid, 1);   // 当日市价随卖出逐个饱和
+                }
+            }
+            catch (Exception e) { UMFLog.Log("[SlimeBridge] econ err: " + e.Message); }
+            if (price <= 0) { PLORT_PRICE.TryGetValue(pid, out price); if (price <= 0) price = 5; }
+            AddCurrencyReal(price);
+            AmmoCall(ammoL, "Decrement", new object[] { pid, 1 });
+            return price;
+        }
+
+        // ---- 围栏收结晶（2026-10-18 用户需求：取代收食物+投喂）----
+        // 有结晶收集器升级的围栏：瞬移到围栏前，从收集器储存槽(SiloStorage)逐个取出
+        //   ——玩家物品栏 +1，收集器槽位 -1，直到收集器清空或物品栏满。
+        // 没有收集器的围栏：瞬移到围栏前，收集围栏范围内的地上结晶
+        //   ——物品栏 +1，地上结晶对应消失（Vacuumable.TryConsume 原生路径）。
+        private void CorralCollectReal(string kind, ActionResult ar)
+        {
+            EnsureScene();
+            if (_player == null) { ar.ok = false; ar.note = "未进入存档"; return; }
+            object playerAmmo = PlayerAmmo();
+            bool indexed = kind != null && kind.StartsWith("corral@");
+            int wantIdx = CorralIndex(kind);
+            int fromCollector = 0, fromGround = 0, skippedFull = 0;
+            var detail = new System.Text.StringBuilder();
+            int ci = 0;
+            foreach (LandPlot plot in AllCorrals())
+            {
+                int idx = ci; ci++;
+                if (indexed && idx != wantIdx) continue;
+                bool full, usedCollector;
+                int taken = CollectOneCorral(plot, playerAmmo, ref skippedFull, out full, out usedCollector);
+                if (taken > 0)
+                {
+                    if (usedCollector) fromCollector += taken; else fromGround += taken;
+                    if (detail.Length > 0) detail.Append("，");
+                    detail.Append("corral@").Append(idx).Append(usedCollector ? "收集器取" : "地上捡").Append(taken);
+                }
+            }
+            int total = fromCollector + fromGround;
+            if (total == 0)
+            {
+                // 地上/收集器都没有结晶：回到市场门口待命（下一轮结晶产出后再来收）。
+                bool atMarket = TeleportToMarketStand();
+                ar.ok = false;
+                ar.note = "围栏里没有可收的结晶" + (skippedFull > 0 ? "（物品栏满，跳过 " + skippedFull + " 个）" : "")
+                          + (atMarket ? "，已在市场门口等待" : "");
+                return;
+            }
+            ar.ok = true;
+            ar.count = total;
+            ar.note = "围栏收结晶：收集器 " + fromCollector + " 个 + 地上 " + fromGround
+                      + " 个（" + detail.ToString() + "）"
+                      + (skippedFull > 0 ? "，物品栏满跳过 " + skippedFull + " 个" : "");
+        }
+
+        // 完整经营循环（2026-10-18 用户定义）：从结晶市场出发 → 挨个瞬移到围栏收取
+        // （有收集器取储存槽/没有收集器捡地上）→ 物品栏满则立刻回市场按当日市价清仓，
+        // 卖完继续瞬移到围栏收集 → 直到所有围栏地上/收集器都没有结晶 → 最后回市场清仓，
+        // 人在市场门口结束。HTTP 线程编排：每个游戏操作单独 RunOnMain，节奏休眠不冻结游戏。
+        private void RanchCycleReal(ActionResult ar)
+        {
+            RunOnMain(() => EnsureScene());
+            if (_player == null) { ar.ok = false; ar.note = "未进入存档"; return; }
+            object playerAmmo = RunOnMain(() => PlayerAmmo());
+            RunOnMain(() => { TeleportToMarketStand(); });   // 起点：市场门口
+            System.Threading.Thread.Sleep(400);
+            int totalGot = 0, totalUnits = 0, totalValue = 0, sellRuns = 0;
+            bool anyCorral = false;
+            for (int round = 0; round < 30; round++)
+            {
+                List<LandPlot> corrals = RunOnMain(() => AllCorrals());
+                if (corrals == null || corrals.Count == 0) break;
+                anyCorral = true;
+                int passGot = 0;
+                bool hitFull = false;
+                int ci = 0;
+                while (ci < corrals.Count)
+                {
+                    LandPlot plot = corrals[ci];
+                    var res = new int[2];   // [0]=收到数 [1]=满包标记
+                    RunOnMain(() =>
+                    {
+                        bool full, usedCollector;
+                        int sk = 0;
+                        int g = CollectOneCorral(plot, playerAmmo, ref sk, out full, out usedCollector);
+                        res[0] = g;
+                        res[1] = full ? 1 : 0;
+                    });
+                    passGot += res[0];
+                    if (res[1] == 1) { hitFull = true; break; }
+                    ci++;
+                    System.Threading.Thread.Sleep(350);   // 围栏间节奏（画面可见）
+                }
+                totalGot += passGot;
+                if (hitFull)
+                {
+                    // 物品栏满：立刻回市场清仓，卖完继续收
+                    RunOnMain(() => { TeleportToMarketStand(); });
+                    System.Threading.Thread.Sleep(300);
+                    var lines = new System.Text.StringBuilder();
+                    int units, value;
+                    SellAllFromAmmo(playerAmmo, out units, out value, lines);
+                    totalUnits += units;
+                    totalValue += value;
+                    sellRuns++;
+                    continue;
+                }
+                if (passGot == 0) break;   // 地上/收集器都没有结晶 → 循环完成
+            }
+            // 终局：回市场把剩余全部卖掉，人在市场门口等待下一轮
+            RunOnMain(() => { TeleportToMarketStand(); });
+            System.Threading.Thread.Sleep(300);
+            var lines2 = new System.Text.StringBuilder();
+            int units2, value2;
+            SellAllFromAmmo(playerAmmo, out units2, out value2, lines2);
+            totalUnits += units2;
+            totalValue += value2;
+            ar.ok = totalGot > 0;
+            ar.count = totalGot;
+            ar.gains = totalValue;
+            if (!anyCorral) { ar.note = "牧场上没有围栏，无法收结晶"; return; }
+            ar.note = totalGot > 0
+                ? "循环完成：共收 " + totalGot + " 个结晶，卖出 " + totalUnits + " 个得 $" + totalValue
+                  + (sellRuns > 0 ? "（途中满包回卖 " + sellRuns + " 次）" : "") + "，在市场门口等待下一轮"
+                : "围栏地上/收集器都没有结晶，在市场门口等待";
+        }
+
+        // 主线程执行：瞬移到该围栏前收取。有收集器：取其储存槽 + 按启动钮（让收集器
+        // 以后把地上结晶吸进槽里）+ 同样捡地上还没被吸走的；没有收集器：只捡地上。
+        // 返回收到总数；物品栏满 full=true；usedCollector 报告是否有收集器。
+        private int CollectOneCorral(LandPlot plot, object playerAmmo, ref int skippedFull, out bool full, out bool usedCollector)
+        {
+            full = false;
+            StandAt(plot.transform.position);   // 人出现在围栏前（画面可见）
+            PlortCollector pc = null;
+            try
+            {
+                var pcs = plot.GetComponentsInChildren<PlortCollector>(true);
+                if (pcs != null && pcs.Length > 0) pc = pcs[0];
+            }
+            catch (Exception) { }
+            usedCollector = pc != null;
+            int taken = 0;
+            if (pc != null)
+            {
+                // 储存槽里有就取（收集器-1，物品栏+1）
+                taken += DrainCollector(pc, playerAmmo, plot.transform.position, ref skippedFull, out full);
+                // 按下收集器启动钮：游戏里就是那个绿色按钮，按了它才开始把地上结晶
+                // 吸进储存槽（下轮循环就能从槽里取）。有冷却时间，按不动就算了。
+                TryActivateCollector(plot);
+            }
+            // 无论有没有收集器：地上还没被吸走的结晶都捡（物品栏+1，地上消失）。
+            // 2026-10-18 修复：旧版有收集器的围栏只取储存槽，收集器没启动时结晶
+            // 全躺在地上却永远没人捡。
+            if (!full)
+            {
+                bool full2;
+                taken += CollectGroundPlorts(plot.transform.position, playerAmmo, ref skippedFull, out full2);
+                full = full || full2;
+            }
+            return taken;
+        }
+
+        // 按收集器启动钮（PlortCollectorActivator.Activate）：让它开始把围栏地上的
+        // 结晶吸进储存槽。带冷却保护，重复按没有副作用。
+        private void TryActivateCollector(LandPlot plot)
+        {
+            try
+            {
+                var acts = plot.GetComponentsInChildren<PlortCollectorActivator>(true);
+                if (acts != null && acts.Length > 0) acts[0].Activate();
+            }
+            catch (Exception e) { UMFLog.Log("[SlimeBridge] activate collector err: " + e.Message); }
+        }
+
+        // 按距离玩家排序的全部围栏（与 FindCorralByIndex 同序，corral@N 下标一致）
+        private List<LandPlot> AllCorrals()
+        {
+            var hits = new List<LandPlot>();
+            foreach (var lp in UnityEngine.Object.FindObjectsOfType<LandPlot>())
+            {
+                if (lp == null) continue;
+                LandPlotModel m = PlotModelOf(lp);
+                if (m != null && m.typeId == LandPlot.Id.CORRAL) hits.Add(lp);
+            }
+            Vector3 p = _player != null ? _player.transform.position : Vector3.zero;
+            hits.Sort(delegate(LandPlot a, LandPlot b)
+            {
+                float da = Vector3.Distance(p, a.transform.position);
+                float db = Vector3.Distance(p, b.transform.position);
+                return da.CompareTo(db);
+            });
+            return hits;
+        }
+
+        // 收集器取物：storage 是私有 SiloStorage，内含自己的 Ammo。逐个：
+        // MaybeAddToSlot 入玩家物品栏(+1)，成功后收集器 Decrement(id,1)(-1)。
+        private int DrainCollector(PlortCollector pc, object playerAmmo, Vector3 atPos, ref int skippedFull, out bool full)
+        {
+            full = false;
+            int taken = 0;
+            try
+            {
+                var flags = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
+                    | System.Reflection.BindingFlags.Instance;
+                var f = pc.GetType().GetField("storage", flags);
+                object silo = f != null ? f.GetValue(pc) : null;
+                if (silo == null) return 0;
+                var la = silo.GetType().GetProperty("LocalAmmo", flags);
+                object siloAmmo = la != null ? la.GetValue(silo, null) : null;
+                if (siloAmmo == null) return 0;
+                object u = AmmoCall(siloAmmo, "GetUsableSlotCount", new object[0]);
+                int usable = u is int ? (int)u : 0;
+                for (int i = 0; i < usable; i++)
+                {
+                    object idObj = AmmoCall(siloAmmo, "GetSlotName", new object[] { i });
+                    if (!(idObj is Identifiable.Id)) continue;
+                    Identifiable.Id sid = (Identifiable.Id)idObj;
+                    if (sid == Identifiable.Id.NONE || !PLORT_IDS.Contains(sid)) continue;
+                    object cObj = AmmoCall(siloAmmo, "GetSlotCount", new object[] { i });
+                    int cnt = cObj is int ? (int)cObj : 0;
+                    for (int n = 0; n < cnt; n++)
+                    {
+                        if (!AddOneToPlayerAmmo(playerAmmo, sid, atPos)) { skippedFull += cnt - n; full = true; return taken; }
+                        AmmoCall(siloAmmo, "Decrement", new object[] { sid, 1 });
+                        taken++;
+                    }
+                }
+            }
+            catch (Exception e) { UMFLog.Log("[SlimeBridge] drain err: " + e.Message); }
+            return taken;
+        }
+
+        // 玩家物品栏 +1：MaybeAddToSlot(id, null) 为主（以计数前后对比判定成功）；
+        // null Identifiable 不被接受时，退临时生成 prefab 实例入栏后销毁实例。
+        private bool AddOneToPlayerAmmo(object playerAmmo, Identifiable.Id id, Vector3 atPos)
+        {
+            if (playerAmmo == null) return false;
+            int before = 0;
+            object b = AmmoCall(playerAmmo, "GetCount", new object[] { id });
+            if (b is int) before = (int)b;
+            AmmoCall(playerAmmo, "MaybeAddToSlot", new object[] { id, null });
+            object a = AmmoCall(playerAmmo, "GetCount", new object[] { id });
+            if (a is int && (int)a > before) return true;
+            try
+            {
+                var gc = GameContext.Instance;
+                if (gc == null || gc.LookupDirector == null) return false;
+                GameObject pf = gc.LookupDirector.GetPrefab(id);
+                if (pf == null) return false;
+                GameObject inst = UnityEngine.Object.Instantiate(pf, atPos + Vector3.up * 1.2f, Quaternion.identity);
+                Identifiable idf = inst.GetComponent<Identifiable>();
+                AmmoCall(playerAmmo, "MaybeAddToSlot", new object[] { id, idf });
+                UnityEngine.Object.Destroy(inst);
+                object a2 = AmmoCall(playerAmmo, "GetCount", new object[] { id });
+                return a2 is int && (int)a2 > before;
+            }
+            catch (Exception) { return false; }
+        }
+
+        // 地上结晶：plot 中心半径 12m 内全部结晶逐个入栏并原生消失
+        private int CollectGroundPlorts(Vector3 center, object playerAmmo, ref int skippedFull, out bool full)
+        {
+            full = false;
+            var cands = new List<Identifiable>();
+            try
+            {
+                foreach (var idf in UnityEngine.Object.FindObjectsOfType<Identifiable>())
+                {
+                    if (idf == null || idf.gameObject == null) continue;
+                    if (!PLORT_IDS.Contains(idf.id)) continue;
+                    if (Vector3.Distance(center, idf.transform.position) > 12f) continue;
+                    if (idf.GetComponent<Vacuumable>() == null) continue;
+                    cands.Add(idf);
+                }
+            }
+            catch (Exception) { }
+            int got = 0;
+            foreach (var idf in cands)
+            {
+                if (idf == null) continue;   // 期间被史莱姆吃掉等
+                if (!AddOneToPlayerAmmo(playerAmmo, idf.id, idf.transform.position))
+                {
+                    skippedFull += cands.Count - got;
+                    full = true;
+                    return got;
+                }
+                var vac = idf.GetComponent<Vacuumable>();
+                bool consumed = false;
+                try { if (vac != null) { vac.TryConsume(); consumed = true; } }
+                catch (Exception) { consumed = false; }
+                if (!consumed)
+                {
+                    try { UnityEngine.Object.Destroy(idf.gameObject); } catch (Exception) { }
+                }
+                got++;
+            }
+            return got;
+        }
+
         private void DroneSetupReal(ActionResult ar)
         {
             EnsureScene();
@@ -1868,86 +2502,71 @@ namespace SlimeBridge
 
         private int ProgramExistingDrones()
         {
-            System.Type droneType = FindGameType("DroneGadget");
-            if (droneType == null) return 0;
-            UnityEngine.Object[] live = null;
-            try { live = UnityEngine.Object.FindObjectsOfType(droneType); }
-            catch (Exception) { return 0; }
-            if (live == null || live.Length == 0) return 0;
             int n = 0;
-            foreach (var obj in live)
+            DroneGadget[] live = null;
+            try { live = UnityEngine.Object.FindObjectsOfType<DroneGadget>(); }
+            catch (Exception) { return 0; }
+            if (live == null) return 0;
+            foreach (var gadget in live)
             {
-                if (obj != null && ProgramOneDrone(obj)) n++;
+                if (gadget != null && ProgramOneDrone(gadget)) n++;
             }
             return n;
         }
 
-        private bool ProgramOneDrone(UnityEngine.Object obj)
+        private bool ProgramOneDrone(DroneGadget gadget)
         {
-            var flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic;
-            bool wrote = false;
-            foreach (var f in obj.GetType().GetFields(flags))
+            DroneMetadata meta = gadget.metadata;
+            if (meta == null || meta.sources == null || meta.destinations == null || meta.targets == null) return false;
+            var srcPlort = FindBehaviour(meta.sources, "m.drone.source.name.corral");
+            var dstMarket = FindBehaviour(meta.destinations, "m.drone.destination.name.plort_market");
+            var tgtPlort = FindTarget(meta.targets, "plorts");
+            if (srcPlort == null || dstMarket == null || tgtPlort == null) return false;
+            int slots = gadget.programCount > 0 ? gadget.programCount : 1;
+            var programs = new DroneMetadata.Program[slots];
+            programs[0] = new DroneMetadata.Program(tgtPlort, srcPlort, dstMarket);
+            if (slots > 1)
             {
-                if (f.Name.IndexOf("rogram", StringComparison.OrdinalIgnoreCase) < 0) continue;
-                object val = null;
-                try { val = f.GetValue(obj); } catch (Exception) { continue; }
-                if (val == null) continue;
-                var arr = val as System.Array;
-                if (arr == null) continue;
-                for (int i = 0; i < arr.Length && i < 2; i++)
-                {
-                    object slot = arr.GetValue(i);
-                    if (slot == null && arr.GetType().GetElementType() != null && !arr.GetType().GetElementType().IsAbstract)
-                    {
-                        try { slot = Activator.CreateInstance(arr.GetType().GetElementType()); arr.SetValue(slot, i); }
-                        catch (Exception) { slot = null; }
-                    }
-                    if (slot != null && FillDroneProgram(slot, i)) wrote = true;
-                }
+                var srcGarden = FindBehaviour(meta.sources, "m.drone.source.name.garden");
+                var dstFeed = FindBehaviour(meta.destinations, "m.drone.destination.name.auto_feeder");
+                var tgtVeg = FindTarget(meta.targets, "veggies");
+                programs[1] = (srcGarden != null && dstFeed != null && tgtVeg != null)
+                    ? new DroneMetadata.Program(tgtVeg, srcGarden, dstFeed)
+                    : programs[0];
             }
-            return wrote;
+            for (int i = 2; i < slots; i++) programs[i] = programs[0];
+            try
+            {
+                RunOnMain(() => gadget.SetPrograms(programs));
+                var station = gadget.station;
+                if (station != null && station.battery != null)
+                    RunOnMain(() => station.battery.AddLiquid(Identifiable.Id.WATER_LIQUID, 1f));
+            }
+            catch (Exception e)
+            {
+                UMFLog.Log("[SlimeBridge] drone program err: " + e.Message);
+                return false;
+            }
+            return true;
         }
 
-        private bool FillDroneProgram(object slot, int index)
+        private static DroneMetadata.Program.Behaviour FindBehaviour(DroneMetadata.Program.Behaviour[] list, string id)
         {
-            var flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic;
-            string sourceName = index == 0 ? "DroneProgramSourceCorral" : "DroneProgramSourceGarden";
-            string destName = index == 0 ? "DroneProgramDestinationPlortMarket" : "DroneProgramDestinationFeeder";
-            string target = index == 0 ? "PINK_PLORT" : "CARROT_VEGGIE";
-            bool wrote = false;
-            foreach (var f in slot.GetType().GetFields(flags))
-            {
-                string n = f.Name.ToLowerInvariant();
-                try
-                {
-                    if (f.FieldType == typeof(string))
-                    {
-                        if (n.IndexOf("source") >= 0) { f.SetValue(slot, sourceName); wrote = true; }
-                        else if (n.IndexOf("dest") >= 0) { f.SetValue(slot, destName); wrote = true; }
-                        else if (n.IndexOf("target") >= 0) { f.SetValue(slot, target); wrote = true; }
-                    }
-                    else if (n.IndexOf("source") >= 0 || n.IndexOf("dest") >= 0)
-                    {
-                        string typeName = n.IndexOf("source") >= 0 ? sourceName : destName;
-                        object created = CreateGameType(typeName);
-                        if (created != null && f.FieldType.IsInstanceOfType(created))
-                        {
-                            f.SetValue(slot, created);
-                            wrote = true;
-                        }
-                    }
-                }
-                catch (Exception) { }
-            }
-            return wrote;
+            if (list == null) return null;
+            foreach (var b in list)
+                if (b != null && b.id == id) return b;
+            return null;
         }
 
-        private object CreateGameType(string name)
+        private static DroneMetadata.Program.Target FindTarget(DroneMetadata.Program.Target[] list, string key)
         {
-            System.Type t = FindGameType(name);
-            if (t == null || t.IsAbstract) return null;
-            try { return Activator.CreateInstance(t); }
-            catch (Exception) { return null; }
+            if (list == null) return null;
+            foreach (var t in list)
+            {
+                if (t == null || string.IsNullOrEmpty(t.id)) continue;
+                if (t.id == key || t.id.IndexOf(key, StringComparison.OrdinalIgnoreCase) >= 0) return t;
+            }
+            return null;
         }
 
         private System.Type FindGameType(string name)
@@ -2292,13 +2911,27 @@ namespace SlimeBridge
             object ammoPre = PlayerAmmo();
             Identifiable.Id id = Identifiable.Id.NONE; int cnt = 0;
             bool fromBag = false;
+            bool indexedCorral = kind != null && kind.StartsWith("corral@");
+            Identifiable.Id wantedFood = Identifiable.Id.NONE;
+            string dietNote = "";
+            if (indexedCorral)
+            {
+                wantedFood = FoodForCorral(kind, out dietNote);
+                if (wantedFood == Identifiable.Id.NONE)
+                {
+                    ar.ok = false;
+                    ar.note = dietNote;
+                    return;
+                }
+            }
             if (ammoPre != null)
             {
-                bool wantFood = (kind == "corral");
+                bool wantFood = (kind == "corral" || indexedCorral);
                 if (_lastGrabbedId != Identifiable.Id.NONE)
                 {
                     object c = RunOnMain(() => AmmoCall(ammoPre, "GetCount", new object[] { _lastGrabbedId }));
-                    bool matches = wantFood ? IsFood(_lastGrabbedId) : PLORT_IDS.Contains(_lastGrabbedId);
+                    bool matches = indexedCorral ? _lastGrabbedId == wantedFood
+                        : (wantFood ? IsFood(_lastGrabbedId) : PLORT_IDS.Contains(_lastGrabbedId));
                     if (matches && c is int && (int)c > 0) id = _lastGrabbedId;
                 }
                 if (id == Identifiable.Id.NONE)
@@ -2318,7 +2951,8 @@ namespace SlimeBridge
                         try
                         {
                             var sid = (Identifiable.Id)System.Enum.Parse(typeof(Identifiable.Id), nm.ToString(), false);
-                            bool matches = wantFood ? IsFood(sid) : PLORT_IDS.Contains(sid);
+                            bool matches = indexedCorral ? sid == wantedFood
+                                : (wantFood ? IsFood(sid) : PLORT_IDS.Contains(sid));
                             if (!matches) continue;
                             object c2 = RunOnMain(() => AmmoCall(ammoPre, "GetSlotCount", new object[] { si }));
                             if (c2 is int && (int)c2 > 0) id = sid;
@@ -2328,9 +2962,25 @@ namespace SlimeBridge
                 }
                 if (id == Identifiable.Id.NONE)
                 {
-                    ar.ok = false; ar.note = "真实物品栏里没有可投掷的" + (kind == "corral" ? "食物" : "结晶");
+                    ar.ok = false;
+                    ar.note = indexedCorral
+                        ? dietNote + "，背包里没有这种食物"
+                        : "真实物品栏里没有可投掷的" + (wantFood ? "食物" : "结晶");
                     return;
                 }
+            }
+            else if (indexedCorral)
+            {
+                int haveBag = _bag.ContainsKey(wantedFood) ? _bag[wantedFood] : 0;
+                if (haveBag <= 0)
+                {
+                    ar.ok = false;
+                    ar.note = dietNote + "，背包里没有这种食物";
+                    return;
+                }
+                id = wantedFood;
+                cnt = haveBag;
+                fromBag = true;
             }
             else if (_bag.Count > 0)
             {
@@ -2349,7 +2999,7 @@ namespace SlimeBridge
                 object hL = RunOnMain(() => AmmoCall(ammoL, "GetCount", new object[] { id }));
                 int haveL = hL is int ? (int)hL : 0;
                 if (haveL <= 0) { ar.ok = false; ar.note = "真实物品栏里没有 " + id; return; }
-                if (kind != "corral")
+                if (kind != "corral" && !indexedCorral)
                 {
                     int priceL = 0;
                     try
@@ -2433,7 +3083,7 @@ namespace SlimeBridge
                 if (spawned)
                 {
                     ar.ok = true; ar.caught = id.ToString();
-                    ar.note = "已从枪口发射 " + id + "(真实物品栏" + haveL + ">"
+                    ar.note = (indexedCorral ? dietNote + "。" : "") + "已从枪口发射 " + id + "(真实物品栏" + haveL + ">"
                               + (RunOnMain(() => AmmoCall(ammoL, "GetCount", new object[] { id })) ?? "?")
                               + ",真实物理弹出) 飞向准星方向";
                     return;
@@ -2442,7 +3092,7 @@ namespace SlimeBridge
             }
             // Ammo 不可用：退回台账模式
             // 市场结算走游戏原生经济系统(EconomyDirector)：真实市价(含饱和度) + RegisterSold
-            if (kind != "corral")
+            if (kind != "corral" && !indexedCorral)
             {
                 int price = 0;
                 try
@@ -2473,9 +3123,10 @@ namespace SlimeBridge
             }
             // 目标：market=投入口(抬高开孔)；corral=最近围栏中心上方
             Vector3 target;
-            if (kind == "corral")
+            if (kind == "corral" || indexedCorral)
             {
-                LandPlot plot = FindPlotOfKind("corral");
+                int plotCount;
+                LandPlot plot = indexedCorral ? FindCorralByIndex(CorralIndex(kind), out plotCount) : FindPlotOfKind("corral");
                 if (plot == null) { ar.ok = false; ar.note = "没有围栏可投"; return; }
                 target = plot.transform.position + Vector3.up * 0.6f;
             }
@@ -2534,7 +3185,7 @@ namespace SlimeBridge
                 // 近距离（市场投入口/围栏）抛物线弹道难以命中：市场掉口边地上、
                 // 围栏直接飞越围墙扔到栏外（实测）。改为从目标正上方落下——
                 // 市场=穿过结算碰撞体；围栏=落进栏内被史莱姆吃到。
-                origin = target + Vector3.up * (kind == "corral" ? 2.2f : 0.3f);
+                origin = target + Vector3.up * ((kind == "corral" || indexedCorral) ? 2.2f : 0.3f);
                 vel = Vector3.down * 2f;
             }
             else
@@ -2558,7 +3209,7 @@ namespace SlimeBridge
             if (_bag[id] <= 0) _bag.Remove(id);
             ar.ok = true;
             ar.caught = id.ToString();
-            ar.note = "已从枪口投出 " + id + " 飞向" + (kind == "corral" ? "围栏" : "结晶市场")
+            ar.note = "已从枪口投出 " + id + " 飞向" + ((kind == "corral" || indexedCorral) ? "围栏" : "结晶市场")
                       + "（真实物理），台账余 " + _bag.Count + " 种";
         }
 

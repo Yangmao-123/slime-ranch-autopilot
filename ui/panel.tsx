@@ -23,6 +23,7 @@ type State = {
   discovery?: string
   reports?: string[]
   timeout_seconds?: number
+  cycle_seconds?: number
   pid?: number | null
 }
 
@@ -32,9 +33,11 @@ export default function Dashboard(props: PluginSurfaceProps<State>) {
   const stop = actions.find((a) => a.id === "stop_autopilot") as HostedAction | undefined
   const setMode = actions.find((a) => a.id === "set_mode") as HostedAction | undefined
   const ref = actions.find((a) => a.id === "set_timeout") as HostedAction | undefined
+  const cyc = actions.find((a) => a.id === "set_cycle") as HostedAction | undefined
   const pushCmd = actions.find((a) => a.id === "push_command") as HostedAction | undefined
 
   const [seconds, setSeconds] = useLocalState("timeout_seconds", state?.timeout_seconds ?? 10)
+  const [cycle, setCycle] = useLocalState("cycle_seconds", state?.cycle_seconds ?? 30)
   const [cmdText, setCmdText] = useLocalState("cmd_text", "")
 
   return (
@@ -79,6 +82,14 @@ export default function Dashboard(props: PluginSurfaceProps<State>) {
             />
           </Field>
           {ref ? <ActionButton action={ref} values={{ seconds }} label={t("btn.saveTimeout", { defaultValue: "保存秒数" })} /> : null}
+          <Field label={t("f.cycle", { defaultValue: "经营循环时间（秒）" })} hint="市场→围栏收结晶→满包回卖→直到清空，一轮隔这么久">
+            <Input
+              type="number"
+              value={String(cycle)}
+              onInput={(e) => setCycle(Number((e.target as HTMLInputElement).value))}
+            />
+          </Field>
+          {cyc ? <ActionButton action={cyc} values={{ seconds: cycle }} label={t("btn.saveCycle", { defaultValue: "保存循环时间" })} /> : null}
         </Stack>
       </Card>
 
