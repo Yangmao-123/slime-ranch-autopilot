@@ -535,6 +535,57 @@ class WalkCaptureIO:
         return {"ok": False, "gains": 0,
                 "note": "投进市场后资金没有增加，这次不算卖出"}
 
+    def sell_kind(self, kind_id: str = "") -> Dict[str, Any]:
+        """按玩家文字指令售卖（2026-10-18）：瞬移结晶市场，卖出指定种类
+        （kind_id 空=全部）的结晶——当日市价逐件结算，物品栏-1/资金+对应单价，
+        直到该种清零。售卖不再是自动行为，只由玩家指令触发。"""
+        self._dismiss_if_paused()
+        tp = self.io.tp_market() if hasattr(self.io, "tp_market") else {"ok": False, "note": "无法瞬移到市场"}
+        if not tp.get("ok"):
+            return {"ok": False, "gains": 0, "note": tp.get("note", "")}
+        time.sleep(0.3)
+        self._dismiss_if_paused()
+        if hasattr(self.io, "market_sell_all"):
+            res = self.io.market_sell_all(kind_id)
+            if res.get("ok"):
+                return {"ok": True, "gains": res.get("gains", 0),
+                        "note": "已按指令售出：{}".format(res.get("note", ""))}
+            return {"ok": False, "gains": 0, "note": res.get("note", "")}
+        return {"ok": False, "gains": 0, "note": "当前 mod 版本不支持按种类售卖，请更新 SlimeBridge"}
+
+    def ranch_cycle(self) -> Dict[str, Any]:
+        """完整经营循环（2026-10-18 用户定义，mod 端编排整个流程）：
+        市场出发 → 挨个瞬移到围栏收取（收集器/地上）→ 物品栏满立刻回市场按当日
+        市价清仓再继续 → 直到地上/收集器都没结晶 → 回市场门口等待下一轮。
+        """
+        self._dismiss_if_paused()
+        if hasattr(self.io, "ranch_cycle"):
+            try:
+                res = self.io.ranch_cycle()
+            except Exception as e:
+                return {"ok": False, "note": f"循环异常：{e}"}
+            return {"ok": bool(res.get("ok")), "count": res.get("count", 0),
+                    "gains": res.get("gains", 0), "note": res.get("note", "")}
+        # 旧版 mod 兜底：收一轮 + 卖一轮
+        got = self.collect_plorts_here()
+        sold = self.sell_here() if got.get("ok") else {"ok": False, "note": ""}
+        note = got.get("note", "")
+        if sold.get("ok"):
+            note += "。已售出，收入 $" + str(sold.get("gains", 0))
+        return {"ok": bool(got.get("ok")), "note": note}
+
+    def collect_plorts_here(self, kind: str = "") -> Dict[str, Any]:
+        """瞬移到每个围栏前收结晶（kind 空=全部；传结晶 Id 只收该种——玩家说卖
+        哪种才收哪种）。有收集器取储存槽+按启动钮+捡地上，没有收集器捡地上。
+        全部围栏一次完成，mod 端自动检测升级状态。"""
+        self._dismiss_if_paused()
+        if hasattr(self.io, "corral_collect"):
+            res = self.io.corral_collect(kind or "")
+            return {"ok": bool(res.get("ok")), "count": res.get("count", 0),
+                    "note": res.get("note", "")}
+        # 旧版 mod 兜底：逐个瞬移吸取结晶
+        return self.grab_here("plort")
+
     def grab_here(self, kind: str) -> Dict[str, Any]:
         """瞬移到物品旁、镜头真实对准（画面可见），吸取走游戏原生路径。
 
@@ -567,37 +618,35 @@ class WalkCaptureIO:
             return {"ok": True, "note": "已瞬移到%s旁边并吸起" % label}
         return {"ok": False, "note": "%s，但吸附后目标仍在原地" % tp.get("note", "")}
 
-    def feed_here(self) -> Dict[str, Any]:
-        """瞬移到围栏前、镜头真实对准（画面可见），食物以真实物理投进围栏。"""
-        self._dismiss_if_paused()
-        slot = "corral@%d" % getattr(self, "_corral_i", 0)
-        tp = self.io.tp_plot(slot) if hasattr(self.io, "tp_plot") else {"ok": False, "note": "无法瞬移到围栏"}
-        self._corral_i = getattr(self, "_corral_i", 0) + 1
-        if not tp.get("ok"):
-            return tp
-        time.sleep(0.45)
-        win = self._load()
-        if win not in (None, False):
-            self._dismiss_if_paused()
-            target = self.io.scan_plot(slot) if hasattr(self.io, "scan_plot") else {"ok": False}
-            if target.get("ok"):
-                self._turn_toward(target, rescanner=lambda: self.io.scan_plot(slot), max_steps=12)
-                self._pitch_toward(lambda: self.io.scan_plot(slot))
-        thrown = {"ok": False, "note": ""}
-        if hasattr(self.io, "vac_launch"):
-            thrown = self.io.vac_launch(slot)
-        magic = self.io.feed_show(slot) if hasattr(self.io, "feed_show") else {"ok": False, "note": ""}
-        notes = tp.get("note", "已到围栏前")
-        if thrown.get("ok"):
-            notes += "。" + thrown.get("note", "")
-        if magic.get("note"):
-            notes += "。" + magic.get("note", "")
-        return {"ok": bool(thrown.get("ok") or magic.get("ok")),
-                "note": notes}
-
     def sell_here(self) -> Dict[str, Any]:
-        """瞬移到结晶市场前，台账背包里的结晶以真实物理投进投入口（原生结算入账）。"""
+        """瞬移到结晶市场前，物品栏全部结晶按当日市价批量清仓。
+
+        结算规则（2026-10-18）：每从物品栏扣掉 1 个结晶，就按当日市价给玩家加
+        对应的钱（EconomyDirector.GetCurrValue + RegisterSold，市价/饱和度真实
+        变化），循环到物品栏结晶为 0。不依赖物理投掷和站位精度。
+        """
         self._dismiss_if_paused()
+        if hasattr(self.io, "market_sell_all"):
+            tp = self.io.tp_market() if hasattr(self.io, "tp_market") else {"ok": False, "note": "无法瞬移到市场"}
+            if not tp.get("ok"):
+                return {"ok": False, "gains": 0, "note": tp.get("note", "")}
+            time.sleep(0.45)
+            self._dismiss_if_paused()
+            res = self.io.market_sell_all()
+            if res.get("ok"):
+                return {"ok": True, "gains": res.get("gains", 0),
+                        "note": "已在结晶市场清仓：{}".format(res.get("note", ""))}
+            return {"ok": False, "gains": 0,
+                    "note": res.get("note", "清仓失败")}
+        # 旧版 mod：退回逐个 vac_launch 的市场结算
+        return self._sell_market_legacy()
+
+    def _sell_market_legacy(self, before: int = -1) -> Dict[str, Any]:
+        if before < 0:
+            try:
+                before = int(self.io.read_money())
+            except Exception:
+                before = -1
         tp = self.io.tp_market() if hasattr(self.io, "tp_market") else {"ok": False, "note": "无法瞬移到市场"}
         if not tp.get("ok"):
             return {"ok": False, "gains": 0, "note": tp.get("note", "")}
@@ -607,10 +656,6 @@ class WalkCaptureIO:
             self._dismiss_if_paused()
             if not self._turn_toward(self._scan_port_close(), rescanner=self._scan_port_close, max_steps=8):
                 pass  # 对准失败也继续：投掷走物理计算，不依赖准星
-        try:
-            before = int(self.io.read_money())
-        except Exception:
-            before = -1
         thrown = 0
         last_note = ""
         if hasattr(self.io, "vac_launch"):

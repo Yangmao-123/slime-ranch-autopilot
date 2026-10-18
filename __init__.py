@@ -125,7 +125,8 @@ class SlimeRanchAutopilotPlugin(NekoPluginBase):
             os.makedirs(self._runtime_dir, exist_ok=True)
         except Exception:
             pass
-        self._seen_msg: int = 0
+        self._outbox_offset: int = 0
+        self._outbox_retrying = False
 
     # ------------------------------------------------------------------ 生命周期
     @lifecycle(id="startup", name="启动", description="启动时同步配置（不自动拉起自动化核心，需手动点「启动自动游玩」）")
@@ -141,7 +142,7 @@ class SlimeRanchAutopilotPlugin(NekoPluginBase):
         except Exception:
             pass
         self._sync_config_to_disk()
-        self._archive_outbox()
+        self._prepare_outbox()
         self._poll_task = asyncio.create_task(self._poll_outbox_loop())
         # 插件被激活/随总开关启动时，不再自动拉起自动化核心：
         # 核心只在用户在面板点「启动自动游玩」(start_autopilot) 时才 spawn，
@@ -170,6 +171,7 @@ class SlimeRanchAutopilotPlugin(NekoPluginBase):
             "bridge_port": int(_get_cfg(self, "bridge_port", 8124)),
             "calibration": _get_cfg(self, "calibration", {}) or {},
             "live_fallback_funds": int(_get_cfg(self, "live_fallback_funds", 1000)),
+            "cycle_seconds": max(5, int(_get_cfg(self, "cycle_seconds", 30))),
         }
         path = os.path.join(self._runtime_dir, "config.json")
         with open(path, "w", encoding="utf-8") as f:
@@ -236,25 +238,39 @@ class SlimeRanchAutopilotPlugin(NekoPluginBase):
         except Exception:
             pass
 
-    def _archive_outbox(self) -> None:
-        """启动时把上一轮的 outbox 挪走，避免历史消息被重新念一遍。"""
-        self._seen_msg = 0
+    def _prepare_outbox(self) -> None:
+        """恢复已提交位置；首次迁移时归档旧日志，此后保留尚未提交的消息。"""
+        self._outbox_offset = 0
         if not self._runtime_dir:
             return
-        path = os.path.join(self._runtime_dir, "outbox.jsonl")
-        if not os.path.exists(path) or os.path.getsize(path) == 0:
+        cursor = os.path.join(self._runtime_dir, "outbox.cursor.json")
+        if os.path.exists(cursor):
+            try:
+                with open(cursor, encoding="utf-8") as f:
+                    self._outbox_offset = max(0, int(json.load(f)["offset"]))
+            except Exception:
+                self.logger.warning("无法恢复消息提交位置，将重新尝试未确认的消息")
             return
+        path = os.path.join(self._runtime_dir, "outbox.jsonl")
         dest = os.path.join(self._runtime_dir, "outbox.prev.jsonl")
         try:
-            if os.path.exists(dest):
-                os.remove(dest)
-            os.replace(path, dest)
+            if os.path.exists(path) and os.path.getsize(path):
+                os.replace(path, dest)
+            self._ack_outbox(0)
         except Exception:
-            pass
+            self.logger.warning("初始化消息提交位置失败")
+
+    def _ack_outbox(self, offset: int) -> None:
+        """只在 SDK 接受本地提交后推进游标；磁盘写入失败时允许重试。"""
+        path = os.path.join(self._runtime_dir, "outbox.cursor.json")
+        with open(path + ".tmp", "w", encoding="utf-8") as f:
+            json.dump({"offset": offset}, f)
+        os.replace(path + ".tmp", path)
+        self._outbox_offset = offset
 
     # ------------------------------------------------------------------ 出站消息
-    def _poll_outbox(self) -> list[dict]:
-        """读取核心写出的 outbox.jsonl 中尚未推送的消息。"""
+    def _poll_outbox(self) -> list[tuple[int, dict]]:
+        """读取未确认的完整行，返回每行结束的字节位置，不提前确认。"""
         out = []
         if not self._runtime_dir:
             return out
@@ -262,17 +278,20 @@ class SlimeRanchAutopilotPlugin(NekoPluginBase):
         if not os.path.exists(path):
             return out
         try:
-            with open(path, "r", encoding="utf-8") as f:
-                lines = f.readlines()
-            for i in range(self._seen_msg, len(lines)):
-                line = lines[i].strip()
-                if not line:
-                    continue
-                try:
-                    out.append(json.loads(line))
-                except Exception:
-                    continue
-            self._seen_msg = len(lines)
+            with open(path, "rb") as f:
+                if os.fstat(f.fileno()).st_size < self._outbox_offset:
+                    self._ack_outbox(0)
+                f.seek(self._outbox_offset)
+                while len(out) < 100:
+                    line = f.readline()
+                    if not line or not line.endswith(b"\n"):
+                        break  # 核心可能正在写这一行，留到下一次读取。
+                    try:
+                        item = json.loads(line.decode("utf-8"))
+                    except (ValueError, UnicodeError):
+                        item = {}
+                        self.logger.warning("跳过格式无效的核心消息行")
+                    out.append((f.tell(), item if isinstance(item, dict) else {}))
         except Exception:
             pass
         return out
@@ -280,27 +299,54 @@ class SlimeRanchAutopilotPlugin(NekoPluginBase):
     async def _poll_outbox_loop(self) -> None:
         while True:
             try:
-                for item in self._poll_outbox():
-                    self._relay(item)
+                self._drain_outbox()
             except Exception:
-                pass
+                self._warn_outbox_retry()
             await asyncio.sleep(1.0)
 
-    def _relay(self, item: dict) -> None:
-        kind = item.get("kind", "info")
+    def _drain_outbox(self) -> None:
+        for offset, item in self._poll_outbox():
+            if not self._relay(item):
+                self._warn_outbox_retry()
+                break
+            self._ack_outbox(offset)
+            if self._outbox_retrying:
+                self.logger.info("核心消息已恢复本地提交")
+                self._outbox_retrying = False
+
+    def _warn_outbox_retry(self) -> None:
+        if not self._outbox_retrying:
+            self.logger.warning("消息提交暂不可用，将保留消息重试")
+            self._outbox_retrying = True
+
+    def _relay(self, item: dict) -> bool:
         text = item.get("text", "")
         if not text:
-            return
+            return True
+        kind = str(item.get("kind", "info"))
+        # 分级投递（对齐 game_agent_minecraft 的做法）：
+        # - respond：强制 NEKO 立刻开口——受会话主动额度限制（实测 2 条/会话，
+        #   Agent 日志 "skip proactive: per-session cap reached"），只给高价值
+        #   事件：新物种/稀有史莱姆/首次进入新区域。
+        # - read：注入对话上下文不逼回复——LLM 在用户下次聊天时自然看到最新
+        #   牧场动态，零额度消耗。扫描快照/经营汇报/告警全走这条路。
+        #   （旧版全部 respond：头两条把额度烧光，之后每条都被拦，NEKO 沉默。）
+        high_value = ("第一次见到" in text or "【稀有】" in text or "首次来到" in text)
+        behavior = "respond" if (high_value and kind == "discovery") else "read"
         try:
-            self.push_message(
+            result = self.push_message(
                 source="slime_ranch_autopilot",
                 visibility=[],
-                ai_behavior="respond",
+                ai_behavior=behavior,
                 parts=[{"type": "text", "text": text}],
-                priority=5,
+                priority=5 if behavior == "respond" else 4,
+                # 排队合并：LLM 忙时旧快照作废、只念最新，避免背诵积压流水账
+                coalesce_key="sr_watch" if behavior == "read" else None,
             )
+            # submitted 只代表 SDK 本地接收，不能当作生成或播放完成。
+            return isinstance(result, dict) and result.get("submitted") is True
         except Exception:
-            pass
+            return False
 
     # ------------------------------------------------------------------ Hosted UI
     @ui.context(id="dashboard")
@@ -315,6 +361,7 @@ class SlimeRanchAutopilotPlugin(NekoPluginBase):
             "discovery": state.get("last_discovery", ""),
             "reports": state.get("reports", []),
             "timeout_seconds": int(_get_cfg(self, "timeout_seconds", 10)),
+            "cycle_seconds": int(_get_cfg(self, "cycle_seconds", 30)),
             "pid": self._proc.pid if self._proc else None,
         }
 
@@ -396,6 +443,26 @@ class SlimeRanchAutopilotPlugin(NekoPluginBase):
         self._write_command({"type": "set_timeout", "seconds": seconds})
         return Ok({"timeout_seconds": seconds})
 
+    @ui.action(label=tr("actions.setCycle", default="保存循环时间"), refresh_context=True)
+    @plugin_entry(
+        id="set_cycle",
+        name=tr("entries.setcycle.name", default="设置循环时间"),
+        description=tr("entries.setcycle.desc", default="自主经营一轮完整循环的间隔秒数（默认30s）"),
+        input_schema={
+            "type": "object",
+            "properties": {"seconds": {"type": "integer", "description": tr("fields.cycleSeconds", default="循环秒数")}},
+            "required": ["seconds"],
+        },
+    )
+    async def set_cycle(self, seconds: int = 30, **_):
+        seconds = max(5, int(seconds))
+        section = dict(self._cfg.get("slime_ranch", {}) or {})
+        section["cycle_seconds"] = seconds
+        self._cfg["slime_ranch"] = section
+        self._sync_config_to_disk()
+        self._write_command({"type": "set_cycle", "seconds": seconds})
+        return Ok({"cycle_seconds": seconds})
+
     @ui.action(label=tr("actions.pushCmd", default="执行指令"), refresh_context=True)
     @plugin_entry(
         id="push_command",
@@ -412,6 +479,79 @@ class SlimeRanchAutopilotPlugin(NekoPluginBase):
             return Err(SdkError("指令为空"))
         self._write_command({"type": "command", "text": text})
         return Ok({"text": text})
+
+    @plugin_entry(
+        id="query_nearby",
+        name=tr("entries.querynearby.name", default="查询周围情况"),
+        description=tr(
+            "entries.querynearby.desc",
+            default="实时查询《史莱姆牧场》玩家周围30米的史莱姆/结晶/食物与所在区域。"
+                "用户询问附近有什么史莱姆、周围情况、牧场现状时调用；游戏未启动时返回失败。",
+        ),
+    )
+    async def query_nearby(self, **_):
+        """供 NEKO 的 Agent 调用：直连游戏内 SlimeBridge 实时查询周边。"""
+        import urllib.request
+        base = os.path.dirname(os.path.abspath(__file__))
+        if base not in sys.path:
+            sys.path.insert(0, base)
+        from core.names import display_name
+        host = _get_cfg(self, "bridge_host", "127.0.0.1")
+        port = int(_get_cfg(self, "bridge_port", 8124) or 8124)
+        try:
+            req = urllib.request.Request(
+                f"http://{host}:{port}/api/action",
+                data=json.dumps({"action": "scan_near", "kind": "30"}).encode("utf-8"),
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=5) as r:
+                res = json.loads(r.read().decode("utf-8"))
+        except Exception as e:
+            return Err(SdkError(f"查询失败：游戏或 SlimeBridge 未启动（{e}）"))
+        if not res.get("ok"):
+            return Err(SdkError(res.get("note") or "查询失败（未进入存档？）"))
+        try:
+            payload = json.loads(res.get("payload") or "{}")
+        except Exception:
+            payload = {}
+        zone = str(payload.get("zone") or res.get("area") or "未知")
+        parts = []
+        detail = {}
+        for key, label in (("slimes", "史莱姆"), ("plorts", "结晶"), ("foods", "食物")):
+            items = payload.get(key) or []
+            detail[key] = [{"name": display_name(str(i.get("id", ""))), "n": int(i.get("n", 0))}
+                           for i in items if isinstance(i, dict)]
+            if detail[key]:
+                parts.append(label + "：" + "、".join(f"{d['name']}×{d['n']}" for d in detail[key]))
+        summary = f"区域「{zone}」。" + ("；".join(parts) if parts else "附近30米内没有史莱姆、结晶或食物。")
+        return Ok({"zone": zone, "summary": summary, **detail})
+
+    @plugin_entry(
+        id="sell_plorts",
+        name=tr("entries.sellplorts.name", default="售卖结晶"),
+        description=tr(
+            "entries.sellplorts.desc",
+            default="在《史莱姆牧场》自主经营模式下，按玩家指令到结晶市场售卖结晶。"
+                "玩家说\"卖粉色结晶\"\"把结晶卖了\"\"卖了全部结晶\"等时调用。"
+                "what 传结晶种类：粉色/岩石/虎斑/荧光/辐射/爆炸/蜂蜜/猎猫/水洼/量子/"
+                "旋风/马赛克/藤蔓/火焰/剑齿/全部。售卖按当日市价逐件结算。",
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "what": {"type": "string", "description": tr(
+                    "fields.sellWhat", default="结晶种类（如：粉色、荧光、全部）")},
+            },
+            "required": ["what"],
+        },
+    )
+    async def sell_plorts(self, what: str = "全部", **_):
+        """Agent 调用：把玩家的售卖指令转给核心执行（须在自主经营模式）。"""
+        what = (what or "").strip() or "全部"
+        self._write_command({"type": "sell_request", "what": what})
+        return Ok({"queued": True, "what": what,
+                   "note": f"已收到售卖指令：{what}（核心将在结晶市场执行）"})
 
     @ui.action(label=tr("actions.capture", default="校准截图"), refresh_context=True)
     @plugin_entry(

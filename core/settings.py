@@ -12,6 +12,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "default_mode": "watch",
     "game_exe": "",
     "auto_launch_game": False,
+    "enable_drones": False,   # 无人机搬运（实验）：当前生成的无人机缺初始化会破坏存档，保持 false
+    "cycle_seconds": 30,      # 经营循环时间（秒）：市场→围栏收取→满包回卖→直到清空，一轮隔这么久再跑
     "engine_python": "",
     "backend": "hybrid",  # hybrid=混合(桥接感知+真实键鼠执行,推荐)；ws=桥接；sim=模拟；live=键鼠校准
     # live 校准：money_region={left,top,width,height}(0..1 归一化)、
@@ -60,6 +62,7 @@ class Settings:
     bridge_host: str = "127.0.0.1"   # ws 后端主机
     bridge_port: int = 8124          # ws 后端端口
     sim_interval: float = 2.0        # 自主每轮间隔秒数
+    cycle_seconds: int = 30          # 经营循环时间（秒），面板可改
     # 模拟层内部状态初始值
     sim_start_funds: int = 800
     sim_inventory: Dict[str, int] = field(default_factory=dict)
@@ -96,6 +99,10 @@ class Settings:
             settings.bridge_port = 8124
         if isinstance(cfg.get("sim_start_funds"), (int, float)):
             settings.sim_start_funds = int(cfg["sim_start_funds"])
+        try:
+            settings.cycle_seconds = max(5, int(cfg.get("cycle_seconds", 30)))
+        except (TypeError, ValueError):
+            settings.cycle_seconds = 30
         if isinstance(cfg.get("sim_inventory"), dict):
             settings.sim_inventory = cfg["sim_inventory"]
         if isinstance(cfg.get("calibration"), dict):

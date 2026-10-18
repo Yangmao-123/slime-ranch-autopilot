@@ -1,23 +1,63 @@
 {
   "actions": {
-    "start": { "label": "启动自动游玩" },
-    "stop": { "label": "停止自动游玩" },
-    "setMode": { "label": "切换模式" },
-    "setTimeout": { "label": "保存秒数" },
-    "pushCmd": { "label": "执行指令" }
+    "start": {
+      "label": "启动自动游玩"
+    },
+    "stop": {
+      "label": "停止自动游玩"
+    },
+    "setMode": {
+      "label": "切换模式"
+    },
+    "setTimeout": {
+      "label": "保存秒数"
+    },
+    "pushCmd": {
+      "label": "执行指令"
+    },
+    "setCycle": "保存循环时间"
   },
   "entries": {
-    "start": { "name": "启动自动游玩", "desc": "启动自动化核心并接管史莱姆牧场" },
-    "stop": { "name": "停止自动游玩", "desc": "停止自动化核心" },
-    "setmode": { "name": "设置模式", "desc": "watch 观望 / ranch 自主经营" },
-    "settimeout": { "name": "设置接管秒数", "desc": "语音模式下超过该秒数未说话则自主接管" },
-    "pushcmd": { "name": "执行指令", "desc": "向核心下达一条文字指令" }
+    "start": {
+      "name": "启动自动游玩",
+      "desc": "启动自动化核心并接管史莱姆牧场"
+    },
+    "stop": {
+      "name": "停止自动游玩",
+      "desc": "停止自动化核心"
+    },
+    "setmode": {
+      "name": "设置模式",
+      "desc": "watch 观望 / ranch 自主经营"
+    },
+    "settimeout": {
+      "name": "设置接管秒数",
+      "desc": "语音模式下超过该秒数未说话则自主接管"
+    },
+    "pushcmd": {
+      "name": "执行指令",
+      "desc": "向核心下达一条文字指令"
+    },
+    "setcycle": {
+      "name": "设置循环时间",
+      "desc": "自主经营一轮完整循环的间隔秒数（默认30s）"
+    },
+    "querynearby": {
+      "name": "查询周围情况",
+      "desc": "实时查询玩家周围30米的史莱姆/结晶/食物与所在区域"
+    },
+    "sellplorts": {
+      "name": "售卖结晶",
+      "desc": "自主经营模式下按玩家指令到结晶市场售卖结晶（当日市价）"
+    }
   },
   "fields": {
     "mode": "watch 或 ranch",
     "seconds": "秒数",
     "text": "指令内容",
-    "itemId": "ID"
+    "itemId": "ID",
+    "cycleSeconds": "循环秒数",
+    "sellWhat": "结晶种类（如：粉色、荧光、全部）"
   },
   "dashboard": {
     "subtitle": "NEKO 接管史莱姆牧场运营",
@@ -39,7 +79,10 @@
     "cmd": "指令文本",
     "report": "内容"
   },
-  "m": { "watch": "观望", "ranch": "自主经营" },
+  "m": {
+    "watch": "观望",
+    "ranch": "自主经营"
+  },
   "btn": {
     "start": "启动",
     "stop": "停止",

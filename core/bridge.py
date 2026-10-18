@@ -50,12 +50,12 @@ class BridgeClient:
         except Exception:
             return None
 
-    def post_json(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any] | None:
+    def post_json(self, path: str, payload: Dict[str, Any], timeout: float = 0) -> Dict[str, Any] | None:
         data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(self.base + path, data=data, method="POST")
         req.add_header("Content-Type", "application/json")
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as r:
+            with urllib.request.urlopen(req, timeout=timeout or self.timeout) as r:
                 return json.loads(r.read().decode("utf-8"))
         except Exception:
             return None
@@ -166,8 +166,8 @@ class BridgeIOController:
         self._last_status = st
         return st
 
-    def _post_action(self, action: str, kind: str = "") -> Dict[str, Any]:
-        res = self.client.post_json("/api/action", {"action": action, "kind": kind}) or {}
+    def _post_action(self, action: str, kind: str = "", timeout: float = 0) -> Dict[str, Any]:
+        res = self.client.post_json("/api/action", {"action": action, "kind": kind}, timeout=timeout) or {}
         return res
 
     def scan_target(self, radius: float = 25.0) -> Dict[str, Any]:
@@ -418,6 +418,57 @@ class BridgeIOController:
     def drone_setup(self) -> Dict[str, Any]:
         res = self._post_action("drone_setup")
         return {"ok": res.get("ok", False), "note": res.get("note", "无人机没有布置上")}
+
+    def market_sell_all(self, kind: str = "") -> Dict[str, Any]:
+        """结晶市场批量清仓：kind 空=全部结晶，否则只卖该 Id（玩家指令驱动）。
+        按当日市价逐个扣物品栏结晶并加钱，直到该种清零。"""
+        res = self._post_action("market_sell_all", kind or "")
+        return {"ok": res.get("ok", False), "gains": res.get("gains", 0),
+                "count": res.get("count", 0), "note": res.get("note", "清仓失败")}
+
+    def corral_collect(self, kind: str = "") -> Dict[str, Any]:
+        """围栏收结晶：有结晶收集器取其储存槽，没有收集器收集围栏地上结晶。"""
+        res = self._post_action("corral_collect", kind or "")
+        return {"ok": res.get("ok", False), "count": res.get("count", 0),
+                "note": res.get("note", "围栏收取失败")}
+
+    def scan_near(self, radius: float = 30.0) -> Dict[str, Any]:
+        """周边感知（观望模式新发现）：radius 内史莱姆/结晶/食物按 Id 计数 + 区域名。"""
+        res = self._post_action("scan_near", str(radius))
+        out: Dict[str, Any] = {"ok": bool(res.get("ok")), "note": res.get("note", ""),
+                               "zone": res.get("area", ""),
+                               "slimes": [], "plorts": [], "foods": []}
+        if not out["ok"]:
+            return out
+        try:
+            payload = json.loads(res.get("payload") or "")
+            if not isinstance(payload, dict):
+                raise ValueError("invalid scan payload")
+            out["zone"] = payload.get("zone") or out["zone"]
+            if not isinstance(out["zone"], str):
+                raise ValueError("invalid scan zone")
+            for key in ("slimes", "plorts", "foods"):
+                items = payload[key]
+                if not isinstance(items, list):
+                    raise ValueError("invalid scan items")
+                counts: Dict[str, int] = {}
+                for item in items:
+                    if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+                        raise ValueError("invalid scan item")
+                    count = int(item["n"])
+                    if item["id"] and count > 0:
+                        counts[item["id"]] = counts.get(item["id"], 0) + count
+                out[key] = [{"id": sid, "n": count} for sid, count in sorted(counts.items())]
+        except Exception:
+            out.update(ok=False, note="周边扫描数据无效，请更新 SlimeBridge")
+        return out
+
+    def ranch_cycle(self) -> Dict[str, Any]:
+        """完整经营循环：市场出发→挨个围栏收取→满包立刻回市场清仓再继续→
+        直到地上/收集器都没结晶→回市场门口结束。长流程，超时 10 分钟。"""
+        res = self._post_action("ranch_cycle", "", timeout=600.0)
+        return {"ok": res.get("ok", False), "count": res.get("count", 0),
+                "gains": res.get("gains", 0), "note": res.get("note", "循环失败")}
 
     def build(self, kind: str) -> Dict[str, Any]:
         st = self._get_status()

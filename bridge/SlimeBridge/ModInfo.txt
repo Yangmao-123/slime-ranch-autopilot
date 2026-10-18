@@ -12,8 +12,8 @@ SlimeBridge v0.5.0 —— 《史莱姆牧场》一代的游戏内桥接 mod（�
 - POST /api/action   -> {"action":"<name>","kind":"<param>"}。列表放在 payload。
 
   感知：target / scan_corral / scan_market / scan_food / scan_plort / scan_plot / scan_facilities / ui_buttons / ui_hover
-  移动：tp_market / tp_plot（corral@N 选第 N 个围栏）/ tp_item / slimes_home / drone_setup
-  原生：vac_grab / vac_launch（corral@N 只投该栏食性对应的食物）/ feed_show / save_now
+  移动：tp_market / tp_plot（corral@N 选第 N 个围栏）/ tp_item / slimes_home / drone_setup / cleanup_drones（销毁场上全部无人机，救存档用）
+  原生：vac_grab / vac_launch（corral@N 只投该栏食性对应的食物）/ feed_show / save_now / corral_collect（围栏收结晶：有收集器取储存槽，没有捡地上）/ market_sell_all（当日市价批量清仓直到物品栏结晶为0）
   诊断：probe / debug_market / debug_scene / debug_ui / debug_types / debug_cams / ammo_probe
 
 【与 NEKO 插件的分工】

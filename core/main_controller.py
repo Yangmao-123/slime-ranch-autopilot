@@ -1,14 +1,15 @@
 """大脑：观望 / 自主经营。
 
 默认观望，不操作游戏。按 V 进入自主经营：每个操作先瞬移到对应地点再执行，
-收食物、投喂、收结晶、卖掉，资金达到费用两倍才建造或升级。
-不跑图、不抓野生史莱姆。
+收结晶（围栏有收集器取储存槽、没有收集器捡地上的）、按当日市价在市场清仓，
+资金达到费用两倍才建造或升级。不跑图、不抓野生史莱姆、不收食物不投喂。
 
 运行：python core/main_controller.py --data-dir <dir> --config <cfg.json>
 可以 --ticks N --interval 0 --backend sim 快速验收。
 """
 from __future__ import annotations
 import argparse
+import json
 import os
 import sys
 import time
@@ -25,6 +26,7 @@ from core.bridge import BridgeIOController  # noqa: E402
 from core.real import WalkCaptureIO  # noqa: E402
 from core.ranch import RanchState, decide_build_action, FACILITY_NAMES, record_built  # noqa: E402
 from core.voice import HotkeyListener  # noqa: E402
+from core.names import SLIME_NAMES, RARE_SLIMES, plort_id_from_text, display_name  # noqa: E402
 
 # 真实购买菜单的按钮关键词（中英双语：SR1 界面文字跟游戏语言走）。
 # 建造菜单(空地块购买页)三个按钮文字大致为 Corral/Coop/Garden 或 围栏/鸡舍/菜园。
@@ -42,6 +44,9 @@ UPGRADE_KEYWORDS = [
     "升级", "围网", "水槽", "水缸", "气网", "结晶收集", "喂食", "喷灌", "喷洒",
 ]
 
+# ---- 观望模式：周边感知与"新发现"（名字映射见 core/names.py，与插件壳共享）----
+WATCH_SCAN_SECONDS = 8.0
+
 
 class Brain:
     def __init__(self, settings: Settings, comms: Comms):
@@ -55,9 +60,15 @@ class Brain:
         self._said: dict[str, tuple[str, int]] = {}
         self._overlay_last = ""
         self._sell_pending = False   # 背包里还有没卖掉的结晶（上轮售卖失败）
+        self._sell_wait_until = 0.0  # 售卖后的 5s 指令窗口截止时刻
         self._drone_checked = False
         self._drones_on = False
         self._corral_i = 0
+        self._watch_due = 0.0
+        self._watch_snapshot = None
+        self._rare_reported: dict[str, float] = {}
+        self._watch_error = ""
+        self._watch_error_at = float("-inf")
         self._hotkey = HotkeyListener(on_toggle=self._on_hotkey)
         # 后端选择
         if settings.backend == "live" and os.path.exists(settings.game_exe):
@@ -129,6 +140,8 @@ class Brain:
         self._drone_checked = False
         self._drones_on = False
         self._said.clear()
+        self._watch_due = 0.0
+        self._watch_snapshot = None
         if self.walk:
             if mode == "ranch":
                 self.walk.clear_abort()
@@ -202,45 +215,123 @@ class Brain:
             return
         if not self._drone_checked:
             self._drone_checked = True
-            setup = self.io.drone_setup() if hasattr(self.io, "drone_setup") else {"ok": False, "note": ""}
-            self._drones_on = bool(setup.get("ok"))
-            if setup.get("note"):
-                self._say("drone", f"【自主】{setup.get('note')}", every=1)
+            # 无人机布置默认禁用：TrySpawnOneDrone 生成的无人机缺初始化(电池/区域注册)，
+            # 每帧 NRE 且炸掉 RegionRegistry 序列化——存档写不出(2026-10-18 实机)。
+            # 待 drone_setup 完整复刻游戏创建流程后再默认启用。
+            self._drones_on = (bool(getattr(self.s, "enable_drones", False))
+                               and hasattr(self.io, "drone_setup")
+                               and bool(self.io.drone_setup().get("ok")))
+            if self._drones_on:
+                self._say("drone", "【自主】无人机搬运已启用（实验）", every=1)
         if self._drones_on:
             if self.ticks % 5 == 4:
                 self._infra_step()
             return
-        step = self.ticks % 5
-        if step == 0:
-            food = self.walk.grab_here("food")
-            if food.get("aborted"):
-                return
-            self._say("food" if food.get("ok") else "no-food",
-                      f"【自主】{food.get('note', '')}", every=2 if food.get("ok") else 4)
-        elif step == 1:
-            fed = self.walk.feed_here()
-            if fed.get("aborted"):
-                return
-            self._say("feed", f"【自主】投喂：{fed.get('note', '')}", every=2)
-        elif step == 2:
-            plort = self.walk.grab_here("plort")
-            if plort.get("aborted"):
-                return
-            if plort.get("ok"):
-                self._sell_pending = True
-            self._say("plort" if plort.get("ok") else "no-plort",
-                      f"【自主】{plort.get('note', '')}", every=2 if plort.get("ok") else 4)
-        elif step == 3:
-            if not getattr(self, "_sell_pending", False):
-                return
-            sold = self.walk.sell_here()
-            if sold.get("aborted"):
-                return
-            if sold.get("ok"):
-                self._sell_pending = False
-            self._say("sell", f"【自主】{sold.get('note', '')}", every=2 if sold.get("ok") else 3)
-        elif self.mode == "ranch":
-            self._infra_step()
+        # 2026-10-18 需求（第三轮）：完全指令驱动且按种类收——待命态在结晶市场
+        # 【原地不动】（不收集不建造）；玩家说卖哪种结晶，才瞬移围栏收集【该种】
+        # 再回市场卖出（corral_collect 传结晶 Id 过滤）。
+        self._say("wait-market",
+                  "【自主】在结晶市场待命；要卖哪种结晶直接说（例：卖粉色结晶 / 卖全部结晶），"
+                  "我这就去收那种结晶来卖～", every=10)
+
+    # ------------------------------------------------------------ 观望：周边感知
+    def _watch_tick(self) -> None:
+        """每 8 秒采集周边快照；图鉴只决定首次发现措辞，不屏蔽周边变化。"""
+        if not hasattr(self.io, "scan_near"):
+            return
+        now = time.monotonic()
+        if now < self._watch_due:
+            return
+        # 以扫描开始时刻计时；主循环扣除 I/O 耗时，不补跑积压的扫描。
+        self._watch_due = now + WATCH_SCAN_SECONDS
+        try:
+            near = self.io.scan_near(30.0)
+        except Exception:
+            self._report_watch_error("周边扫描连接异常，请检查游戏和 SlimeBridge", now)
+            return
+        if not near.get("ok"):
+            self._report_watch_error(
+                "周边扫描不可用，请确认已进入存档，且 SlimeBridge 已更新并支持 scan_near", now)
+            return
+        self._watch_error = ""
+        disc = self._load_discoveries()
+        slimes = near.get("slimes", [])
+        new_species = [s["id"] for s in slimes
+                       if s.get("id") and s["id"] not in disc["seen_slimes"]]
+        zone = near.get("zone", "")
+        new_zone = bool(zone) and zone not in disc["zones"]
+        snapshot = (zone, *(tuple(sorted((s["id"], s["n"]) for s in near.get(key, [])))
+                            for key in ("slimes", "plorts", "foods")))
+        rare = [s["id"] for s in slimes if s.get("id") in RARE_SLIMES
+                and now - self._rare_reported.get(s["id"], float("-inf")) >= 60.0]
+        if snapshot == self._watch_snapshot and not rare:
+            return
+        parts = []
+        if rare:
+            parts.append("【稀有】附近出现了" + "、".join(SLIME_NAMES[s] for s in rare) + "！")
+        if new_zone:
+            parts.append(f"【探索】首次来到「{zone}」。")
+        elif zone:
+            parts.append(f"当前区域：{zone}。")
+        if new_species:
+            parts.append("第一次见到" + "、".join(SLIME_NAMES.get(s, s) for s in new_species) + "。")
+        parts.append("玩家周围30米" + (self._near_summary(near) or "内没有扫描到史莱姆、结晶或食物") + "。")
+        # 只产生一条事件；先可靠写入 outbox，再推进快照与图鉴。
+        if not self.c.report_discovery(f"watch-{time.time_ns()}", "".join(parts)):
+            return
+        self._watch_snapshot = snapshot
+        for sid in rare:
+            self._rare_reported[sid] = now
+        disc["seen_slimes"].extend(new_species)
+        if new_zone:
+            disc["zones"].append(zone)
+        if new_species or new_zone:
+            self._save_discoveries()
+        self.ranch.known_slimes = [SLIME_NAMES.get(s, s) for s in disc["seen_slimes"]]
+
+    def _report_watch_error(self, text: str, now: float) -> None:
+        if text != self._watch_error or now - self._watch_error_at >= 60.0:
+            if self.c.emit("warning", text):
+                self._watch_error = text
+                self._watch_error_at = now
+
+    def _near_summary(self, near) -> str:
+        bits = []
+        slimes = [s for s in near.get("slimes", []) if s.get("id")]
+        if slimes:
+            top = sorted(slimes, key=lambda s: -s.get("n", 0))[:3]
+            bits.append("、".join(f"{SLIME_NAMES.get(s['id'], s['id'])}×{s['n']}" for s in top))
+        pn = sum(s.get("n", 0) for s in near.get("plorts", []))
+        fn = sum(s.get("n", 0) for s in near.get("foods", []))
+        if pn:
+            bits.append(f"结晶×{pn}")
+        if fn:
+            bits.append(f"食物×{fn}")
+        return ("（附近有 " + "，".join(bits) + "）") if bits else ""
+
+    def _load_discoveries(self) -> dict:
+        if getattr(self, "_disc", None) is None:
+            try:
+                with open(os.path.join(self.s.data_dir, "discoveries.json"), encoding="utf-8") as f:
+                    self._disc = json.load(f)
+            except Exception:
+                self._disc = {}
+            if not isinstance(self._disc, dict):
+                self._disc = {}
+            for key in ("seen_slimes", "zones"):
+                items = self._disc.get(key)
+                self._disc[key] = (list(dict.fromkeys(s for s in items if isinstance(s, str)))
+                                   if isinstance(items, list) else [])
+        return self._disc
+
+    def _save_discoveries(self) -> None:
+        try:
+            path = os.path.join(self.s.data_dir, "discoveries.json")
+            with open(path + ".tmp", "w", encoding="utf-8") as f:
+                json.dump(self._disc, f, ensure_ascii=False, indent=1)
+            os.replace(path + ".tmp", path)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------ 需求1 建造/升级（真实 UI 购买）
     def _facilities_signature(self):
@@ -354,14 +445,21 @@ class Brain:
                 break
 
             if self.mode != "ranch":
+                t0 = time.monotonic()
+                self.ticks += 1
+                self._watch_tick()
                 self.c.set_state(mode="watch", phase="watching",
                                  funds=self.io.read_money(),
                                  infra=dict(self.ranch.level),
                                  slimes=list(self.ranch.known_slimes))
                 self._push_overlay()
-                time.sleep(self._interval())
+                now = time.monotonic()
+                poll_rest = max(0.0, self._interval() - (now - t0))
+                scan_rest = max(0.0, self._watch_due - now) if self._watch_due else poll_rest
+                time.sleep(max(0.01, min(poll_rest, scan_rest)))
                 continue
 
+            t0 = time.time()
             self._ranch_tick()
             self.c.set_state(mode="ranch",
                              phase="running" if self._market_ready else "resetting",
@@ -369,13 +467,75 @@ class Brain:
                              infra=dict(self.ranch.level),
                              slimes=list(self.ranch.known_slimes))
             self._push_overlay()
-            time.sleep(self._interval())
+            if self.walk:
+                if not self._market_ready:
+                    time.sleep(1.0)   # 重置阶段（瞬移到市场）不算循环间隔，立刻进第一轮
+                else:
+                    # 循环时间（面板可改，默认 30s）：从本轮开始计（含循环执行耗时）；
+                    # 等待期间持续接收指令（售卖指令 0.5s 内响应）
+                    rest = float(getattr(self.s, "cycle_seconds", 30)) - (time.time() - t0)
+                    self._command_aware_sleep(max(1.0, rest))
+            else:
+                time.sleep(self._interval())
 
         self.c.set_state(running=False, phase="stopped")
         self._hotkey.stop()
 
     def _interval(self) -> float:
         return self.s.sim_interval
+
+    # ------------------------------------------------------------ 指令驱动售卖
+    def _command_aware_sleep(self, seconds: float) -> None:
+        """等待期间持续接收指令（售卖指令立即执行）。
+
+        售卖完成后的 5s 指令窗口：窗口内不开始下一轮收集，人停在结晶市场；
+        新指令随时插入处理（0.5s 轮询 command.json）。窗口关闭且无新指令后
+        才恢复正常的循环节拍。
+        """
+        end = time.time() + max(0.2, seconds)
+        while True:
+            now = time.time()
+            wait_until = getattr(self, "_sell_wait_until", 0.0)
+            if wait_until > now and end < wait_until:
+                end = wait_until   # 指令窗口内保持待命，不进入下一轮收集
+            if now >= end:
+                return
+            while True:
+                cmd = self.c.read_command()
+                if not cmd:
+                    break
+                self._handle_command(cmd)
+            remain = end - time.time()
+            if remain <= 0:
+                return
+            time.sleep(min(0.5, remain))
+
+    def _do_sell_request(self, what: str) -> None:
+        """玩家文字售卖指令：先瞬移围栏收集结晶，再回市场按当日市价卖出指定种类，
+        然后进入 5s 指令窗口（窗口内继续听吩咐，没有就呆在结晶市场）。"""
+        if self.mode != "ranch":
+            self.c.say("【售卖】现在不是自主经营模式哦；按 V 进入自主经营后，再告诉我要卖什么结晶～")
+            return
+        pid = plort_id_from_text(what)
+        if pid is None:
+            self.c.say("【售卖】没听懂「" + (what or "") + "」是哪种结晶。"
+                       "可以说：卖粉色结晶、卖荧光结晶……或者 卖全部结晶")
+            return
+        # 1) 先去围栏收集【该种】结晶（说卖之前不收集、也不收集别的种类）
+        self._say("sell-collect", "【售卖】收到！先去围栏收集" + (display_name(pid) if pid else "全部") + "，马上回来卖～", every=1)
+        collected = self.walk.collect_plorts_here(pid)
+        collect_note = str(collected.get("note", ""))
+        # 2) 回结晶市场按指令卖出
+        res = self.walk.sell_kind(pid)
+        if res.get("ok"):
+            self._sell_wait_until = time.time() + 5.0
+            note = str(res.get("note", ""))
+            extra = ("（" + collect_note + "）") if collect_note else ""
+            self.c.say("【售卖】" + note + extra
+                       + " 5秒内可以继续吩咐；没有的话我就呆在结晶市场等你～")
+        else:
+            self.c.say("【售卖】" + str(res.get("note", ""))
+                       + (("；刚收集的情况：" + collect_note) if collect_note else ""))
 
     def _handle_command(self, cmd) -> None:
         t = cmd.get("type")
@@ -387,10 +547,19 @@ class Brain:
         elif t == "set_timeout":
             self.s.timeout_seconds = max(1, int(cmd.get("seconds", self.s.timeout_seconds)))
             self.c.say(f"接管秒数已更新为 {self.s.timeout_seconds}s")
+        elif t == "set_cycle":
+            self.s.cycle_seconds = max(5, int(cmd.get("seconds", getattr(self.s, "cycle_seconds", 30))))
+            self.c.say(f"循环时间已更新为 {self.s.cycle_seconds}s")
+        elif t == "sell_request":
+            self._do_sell_request(str(cmd.get("what", "")))
         elif t == "command":
             text = cmd.get("text", "")
-            res = run_manual_command(self.io, text)
-            self.c.say(f"[指令] 「{text}」 -> {res.get('note','')}")
+            if text.strip().startswith("卖"):
+                # 面板「执行指令」也能触发：卖粉色结晶 / 卖全部结晶
+                self._do_sell_request(text.strip()[1:])
+            else:
+                res = run_manual_command(self.io, text)
+                self.c.say(f"[指令] 「{text}」 -> {res.get('note','')}")
 
 
 def main(argv=None) -> None:

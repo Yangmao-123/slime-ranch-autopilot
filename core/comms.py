@@ -46,24 +46,28 @@ class Comms:
         return dict(self._state)
 
     # ------------------------------------------------------------ 出站
-    def emit(self, kind: str, text: str) -> None:
+    def emit(self, kind: str, text: str) -> bool:
         line = json.dumps({"ts": time.strftime("%H:%M:%S"), "kind": kind, "text": text}, ensure_ascii=False)
         try:
             with open(self.outbox_path, "a", encoding="utf-8") as f:
                 f.write(line + "\n")
+            return True
         except Exception:
-            pass
+            self.logger.warning("核心消息写入失败，将在后续扫描重试")
+            return False
 
-    def report_discovery(self, what: str, text: str) -> None:
+    def report_discovery(self, what: str, text: str) -> bool:
         """有新发现时汇报（同类发现只报一次），并写入 state.reports。"""
         if what in self._seen_discoveries:
-            return
+            return True
+        if not self.emit("discovery", f"[新发现] {text}"):
+            return False
         self._seen_discoveries.add(what)
         self._state["last_discovery"] = text
         self._state.setdefault("reports", []).append(text)
         self._state["reports"] = self._state["reports"][-12:]
         self.set_state()
-        self.emit("discovery", f"[新发现] {text}")
+        return True
 
     def say(self, text: str) -> None:
         self.emit("info", text)
