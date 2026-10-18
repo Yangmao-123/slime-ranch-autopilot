@@ -5,8 +5,8 @@ NEKO starts in watch mode and does not touch the game. Press **V** to enter ranc
 Ranch mode, one action per cycle:
 
 1. Teleport to the plort market.
-2. If a drone can be programmed, leave daily hauling to it. The player only shows up to build or upgrade.
-3. Otherwise teleport beside food and vacuum it, teleport to the next corral and feed, teleport beside plorts and vacuum them, then teleport to the market and sell.
+2. If a placed drone accepts a program, it hauls plorts to the market, and vegetables to the feeder when it has a second slot. The player then only shows up to build or upgrade.
+3. Otherwise teleport beside food and vacuum it, feed each corral the food its slimes eat, then collect plorts and sell them at the market.
 4. Build or upgrade a corral, coop, or garden only when funds are at least twice the next cost. Each building is built once and upgraded once.
 
 The game must be fully quit before `SlimeBridge.dll` is replaced. Rename `Mods\SRMP.dll` to `SRMP.dll.disabled` or saves can fail. Do not run the game as administrator.

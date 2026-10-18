@@ -1,37 +1,21 @@
-SlimeBridge v0.4.0 —— 《史莱姆牧场》一代的游戏内桥接 mod（供 NEKO 插件"史莱姆牧场自动游玩"接入）。
+SlimeBridge v0.5.0 —— 《史莱姆牧场》一代的游戏内桥接 mod（供 NEKO 插件「史莱姆牧场自动游玩」接入）。
 
 【安装位 / 模组端口】
-- 加载器：UnityCoreMod（游戏 Mods 目录里的 SRMP.dll 负责加载实现 IUnityMod 的 dll）。
-- 安装：把编译产物 SlimeBridge.dll 放到 <游戏目录>\Mods\ 下（覆盖旧版前先完全退出游戏）。
-- 编译：csc @build.rsp（或 install.py 第 4 步），引用游戏 SlimeRancher_Data\Managed 下的 dll。
-- 网络端口：启动后监听 127.0.0.1:8124（仅本机）。NEKO 插件侧 [slime_ranch] bridge_port 必须与之一致。
+- 加载器：UnityCoreMod。把 SlimeBridge.dll 放到 <游戏目录>\Mods\。不要打成 .umfmod。
+- Mods\SRMP.dll 要改名为 SRMP.dll.disabled，否则单机会打断存档。
+- 编译：py -3 install.py，或 csc @build.rsp。引用游戏 SlimeRancher_Data\Managed 下的 dll。覆盖前先完全退出游戏。
+- 网络端口：127.0.0.1:8124。NEKO 插件 [slime_ranch] bridge_port 必须一致。
 
-【HTTP 契约（NEKO 接入预留接口）】
-- GET  /api/health   -> {"ok":true,"name":"slime_bridge","version":"0.4.0","features":[...]}
-                      能力握手：插件先读 features，旧 mod 缺动作时插件应提示更新而非静默失败。
-- GET  /api/status   -> {money, facilities{corral,coop,garden:{level,count}}, plorts, area, game_loaded, note(含玩家坐标)}
-- POST /api/action   -> {"action":"<name>","kind":"<param>"}；列表类结果放在 payload 字段(JSON 字符串)。
+【HTTP 契约】
+- GET  /api/health   -> {"ok":true,"name":"slime_bridge","version":"0.5.0","features":[...]}
+- GET  /api/status   -> 资金、设施、结晶、区域、玩家坐标
+- POST /api/action   -> {"action":"<name>","kind":"<param>"}。列表放在 payload。
 
-  状态/魔法类（诊断保留，自主经营循环不再用于购买）：
-    money_add / build / upgrade / harvest / sell / explore / go_home / continue / set_overlay
-    tp_market / probe / debug_market / debug_scene / debug_font
-  只读感知类（真实键鼠执行层的眼睛）：
-    target            最近可抓目标(野生史莱姆/落地结晶) yaw/dist/坐标
-    scan_corral       最近围栏 yaw/dist/坐标
-    scan_market       结晶市场：投入口(cx,cz,cyaw) + 玩家(px,py) + 区域
-    scan_food         最近食物(水果/蔬菜/鸡；围栏内的不算)
-    scan_plort        最近落地结晶(含围栏内)
-    scan_plot         最近指定类型地块(corral|coop|garden|empty) yaw/dist + payload{isEmpty,upgrades}
-    scan_facilities   全地块清单 payload=[{kind,isEmpty,x,z,upgrades}]（真实购买验证依据）
-    ui_buttons        当前可见可点 uGUI 按钮 payload={screen_w,screen_h,buttons:[{label,name,parent,sx,sy,w,h}]}
-                      （屏幕坐标为渲染分辨率像素、左下原点；NEKO 侧按窗口客户区换算后真实鼠标点击）
-    debug_ui          Canvas/Button/文字组件内省（诊断菜单实现方式用）
-
-【策略】环境变量 SLIME_BRIDGE_STRATEGY，缺省 native：
-  native    反射调用游戏真实 API，读写真实资金/设施/结晶。
-  simulate  仅台账记账，用于无游戏环境演示。
+  感知：target / scan_corral / scan_market / scan_food / scan_plort / scan_plot / scan_facilities / ui_buttons / ui_hover
+  移动：tp_market / tp_plot（corral@N 选第 N 个围栏）/ tp_item / slimes_home / drone_setup
+  原生：vac_grab / vac_launch（corral@N 只投该栏食性对应的食物）/ feed_show / save_now
+  诊断：probe / debug_market / debug_scene / debug_ui / debug_types / debug_cams / ammo_probe
 
 【与 NEKO 插件的分工】
-- mod 只负责"感知 + 状态读写"，不做键鼠；真实转向/走路/吸附/点菜单由插件 core/real.py 用键鼠完成。
-- 自主经营的建造/升级走游戏内真实 UI：scan_plot 走到地块 → ui_buttons 等菜单 → 真实点击 →
-  scan_facilities + 资金变化双重验证。魔法 build/upgrade 仅保留供诊断。
+- 瞬移、吸取、发射、市场结算、无人机程序由 mod 完成。转向和点菜单由 core/real.py 用真实键鼠完成。
+- 建造/升级先点游戏菜单。点不到时 build/upgrade 仍可完成购买。人会先出现在地块前。

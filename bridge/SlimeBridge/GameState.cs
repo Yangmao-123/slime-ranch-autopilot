@@ -550,7 +550,7 @@ namespace SlimeBridge
                             case "tp_market": TeleportMarketReal(ar); break;
                             case "tp_plot": TeleportPlotReal(kind, ar); break;
                             case "tp_item": TeleportItemReal(kind, ar); break;
-                            case "feed_show": FeedShowReal(ar); break;
+                            case "feed_show": FeedShowReal(kind, ar); break;
                             case "drone_setup": DroneSetupReal(ar); break;
                             case "debug_types": DebugTypesReal(kind, ar); break;
                             case "debug_cams": DebugCamsReal(ar); break;
@@ -1658,22 +1658,153 @@ namespace SlimeBridge
             ar.note = "已瞬移到" + (kind == "plort" ? "结晶" : "食物") + "旁边";
         }
 
-        // 站到围栏前。能写进喂食器就放一份胡萝卜，写不进也保持站位，交给键鼠做出投喂动作。
-        private void FeedShowReal(ActionResult ar)
+        private int CorralIndex(string kind)
+        {
+            int index = 0;
+            if (string.IsNullOrEmpty(kind)) return 0;
+            int at = kind.IndexOf('@');
+            if (at >= 0) int.TryParse(kind.Substring(at + 1), out index);
+            return index;
+        }
+
+        private LandPlot FindCorralByIndex(int index, out int count)
+        {
+            var hits = new List<LandPlot>();
+            foreach (var lp in UnityEngine.Object.FindObjectsOfType<LandPlot>())
+            {
+                if (lp == null) continue;
+                LandPlotModel m = PlotModelOf(lp);
+                if (m != null && m.typeId == LandPlot.Id.CORRAL) hits.Add(lp);
+            }
+            Vector3 p = _player != null ? _player.transform.position : Vector3.zero;
+            hits.Sort(delegate(LandPlot a, LandPlot b)
+            {
+                float da = Vector3.Distance(p, a.transform.position);
+                float db = Vector3.Distance(p, b.transform.position);
+                return da.CompareTo(db);
+            });
+            count = hits.Count;
+            if (count == 0) return null;
+            if (index < 0) index = 0;
+            return hits[index % count];
+        }
+
+        private List<Identifiable.Id> FoodsFor(SlimeDefinition def)
+        {
+            var list = new List<Identifiable.Id>();
+            if (def == null || def.Diet == null) return list;
+            if (def.Diet.Favorites != null)
+            {
+                foreach (var id in def.Diet.Favorites)
+                    if (IsFood(id) && !list.Contains(id)) list.Add(id);
+            }
+            if (def.Diet.MajorFoodGroups != null)
+            {
+                foreach (var g in def.Diet.MajorFoodGroups)
+                {
+                    Identifiable.Id staple = StapleFood(g);
+                    if (staple != Identifiable.Id.NONE && !list.Contains(staple)) list.Add(staple);
+                }
+            }
+            if (def.Diet.AdditionalFoods != null)
+            {
+                foreach (var id in def.Diet.AdditionalFoods)
+                    if (IsFood(id) && !list.Contains(id)) list.Add(id);
+            }
+            return list;
+        }
+
+        private static Identifiable.Id StapleFood(SlimeEat.FoodGroup group)
+        {
+            string name = group.ToString();
+            if (name == "VEGGIES") return Identifiable.Id.CARROT_VEGGIE;
+            if (name == "FRUIT") return Identifiable.Id.POGO_FRUIT;
+            if (name == "MEAT") return Identifiable.Id.BRIAR_HEN;
+            return Identifiable.Id.NONE;
+        }
+
+        // 看这一栏里的史莱姆食性，选出它们都吃的一种食物。最爱优先，否则用蔬菜/水果/肉的常备食物。
+        private Identifiable.Id FoodForCorral(string kind, out string note)
+        {
+            note = "";
+            int count;
+            LandPlot plot = FindCorralByIndex(CorralIndex(kind), out count);
+            if (plot == null) { note = "没有围栏"; return Identifiable.Id.NONE; }
+            var defs = new List<SlimeDefinition>();
+            var names = new List<string>();
+            Vector3 center = plot.transform.position;
+            SlimeDefinitions catalog = null;
+            try
+            {
+                var ctx = SRSingleton<GameContext>.Instance;
+                if (ctx != null) catalog = ctx.SlimeDefinitions;
+            }
+            catch (Exception) { }
+            foreach (var idf in UnityEngine.Object.FindObjectsOfType<Identifiable>())
+            {
+                if (idf == null || idf.gameObject == null) continue;
+                if ((idf.transform.position - center).sqrMagnitude > 64f) continue;
+                string n = idf.id.ToString();
+                if (n.IndexOf("SLIME", StringComparison.Ordinal) < 0 && n.IndexOf("LARGO", StringComparison.Ordinal) < 0) continue;
+                SlimeDefinition def = null;
+                var eat = idf.GetComponent<SlimeEat>();
+                if (eat != null) def = eat.slimeDefinition;
+                if (def == null && catalog != null) def = catalog.GetSlimeByIdentifiableId(idf.id);
+                if (def == null) continue;
+                bool seen = false;
+                for (int i = 0; i < defs.Count; i++)
+                    if (defs[i].IdentifiableId == def.IdentifiableId) seen = true;
+                if (seen) continue;
+                defs.Add(def);
+                names.Add(def.IdentifiableId.ToString());
+            }
+            if (defs.Count == 0) { note = "这个围栏里没有史莱姆"; return Identifiable.Id.NONE; }
+            List<Identifiable.Id> common = FoodsFor(defs[0]);
+            for (int i = 1; i < defs.Count; i++)
+            {
+                var next = FoodsFor(defs[i]);
+                var keep = new List<Identifiable.Id>();
+                foreach (var id in common)
+                    if (next.Contains(id)) keep.Add(id);
+                common = keep;
+            }
+            string who = string.Join("/", names.ToArray());
+            if (common.Count == 0)
+            {
+                var any = FoodsFor(defs[0]);
+                if (any.Count == 0) { note = who + " 没有对应的固体食物"; return Identifiable.Id.NONE; }
+                note = who + " 食性不完全一样，先喂 " + any[0];
+                return any[0];
+            }
+            note = who + " 吃 " + common[0];
+            return common[0];
+        }
+
+        // 站到指定围栏前，按栏里史莱姆的食性把对应食物放进喂食器。
+        private void FeedShowReal(string kind, ActionResult ar)
         {
             EnsureScene();
-            LandPlot plot = FindPlotOfKind("corral");
+            int count;
+            LandPlot plot = FindCorralByIndex(CorralIndex(string.IsNullOrEmpty(kind) ? "corral@0" : kind), out count);
             if (plot == null || _player == null)
             {
                 ar.ok = false;
                 ar.note = "没有围栏，无法投喂";
                 return;
             }
+            string dietNote;
+            Identifiable.Id foodId = FoodForCorral(string.IsNullOrEmpty(kind) ? "corral@0" : kind, out dietNote);
             RunOnMain(() => StandAt(plot.transform.position));
+            if (foodId == Identifiable.Id.NONE)
+            {
+                ar.ok = false;
+                ar.note = dietNote;
+                return;
+            }
             try
             {
                 var flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic;
-                object foodId = Enum.Parse(typeof(Identifiable.Id), "CARROT_VEGGIE");
+                object foodObj = foodId;
                 foreach (var c in plot.GetComponentsInChildren<Component>(true))
                 {
                     if (c == null) continue;
@@ -1691,7 +1822,7 @@ namespace SlimeBridge
                         if (sig.Length > 0) sig.Append(",");
                         sig.Append(p.ParameterType.Name);
                     }
-                    object[] args = ps.Length >= 2 ? new object[] { foodId, null } : new object[] { foodId };
+                    object[] args = ps.Length >= 2 ? new object[] { foodObj, null } : new object[] { foodObj };
                     if (ps.Length >= 3) args = new object[] { foodId, null, 6 };
                     Exception invokeErr = null;
                     RunOnMain(() =>
@@ -1706,7 +1837,7 @@ namespace SlimeBridge
                         return;
                     }
                     ar.ok = true;
-                    ar.note = "已站在围栏前，MaybeAddToSlot(" + sig + ") 已写入喂食器";
+                    ar.note = dietNote + "。MaybeAddToSlot(" + sig + ") 已写入喂食器";
                     return;
                 }
             }
@@ -1868,86 +1999,71 @@ namespace SlimeBridge
 
         private int ProgramExistingDrones()
         {
-            System.Type droneType = FindGameType("DroneGadget");
-            if (droneType == null) return 0;
-            UnityEngine.Object[] live = null;
-            try { live = UnityEngine.Object.FindObjectsOfType(droneType); }
-            catch (Exception) { return 0; }
-            if (live == null || live.Length == 0) return 0;
             int n = 0;
-            foreach (var obj in live)
+            DroneGadget[] live = null;
+            try { live = UnityEngine.Object.FindObjectsOfType<DroneGadget>(); }
+            catch (Exception) { return 0; }
+            if (live == null) return 0;
+            foreach (var gadget in live)
             {
-                if (obj != null && ProgramOneDrone(obj)) n++;
+                if (gadget != null && ProgramOneDrone(gadget)) n++;
             }
             return n;
         }
 
-        private bool ProgramOneDrone(UnityEngine.Object obj)
+        private bool ProgramOneDrone(DroneGadget gadget)
         {
-            var flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic;
-            bool wrote = false;
-            foreach (var f in obj.GetType().GetFields(flags))
+            DroneMetadata meta = gadget.metadata;
+            if (meta == null || meta.sources == null || meta.destinations == null || meta.targets == null) return false;
+            var srcPlort = FindBehaviour(meta.sources, "m.drone.source.name.corral");
+            var dstMarket = FindBehaviour(meta.destinations, "m.drone.destination.name.plort_market");
+            var tgtPlort = FindTarget(meta.targets, "plorts");
+            if (srcPlort == null || dstMarket == null || tgtPlort == null) return false;
+            int slots = gadget.programCount > 0 ? gadget.programCount : 1;
+            var programs = new DroneMetadata.Program[slots];
+            programs[0] = new DroneMetadata.Program(tgtPlort, srcPlort, dstMarket);
+            if (slots > 1)
             {
-                if (f.Name.IndexOf("rogram", StringComparison.OrdinalIgnoreCase) < 0) continue;
-                object val = null;
-                try { val = f.GetValue(obj); } catch (Exception) { continue; }
-                if (val == null) continue;
-                var arr = val as System.Array;
-                if (arr == null) continue;
-                for (int i = 0; i < arr.Length && i < 2; i++)
-                {
-                    object slot = arr.GetValue(i);
-                    if (slot == null && arr.GetType().GetElementType() != null && !arr.GetType().GetElementType().IsAbstract)
-                    {
-                        try { slot = Activator.CreateInstance(arr.GetType().GetElementType()); arr.SetValue(slot, i); }
-                        catch (Exception) { slot = null; }
-                    }
-                    if (slot != null && FillDroneProgram(slot, i)) wrote = true;
-                }
+                var srcGarden = FindBehaviour(meta.sources, "m.drone.source.name.garden");
+                var dstFeed = FindBehaviour(meta.destinations, "m.drone.destination.name.auto_feeder");
+                var tgtVeg = FindTarget(meta.targets, "veggies");
+                programs[1] = (srcGarden != null && dstFeed != null && tgtVeg != null)
+                    ? new DroneMetadata.Program(tgtVeg, srcGarden, dstFeed)
+                    : programs[0];
             }
-            return wrote;
+            for (int i = 2; i < slots; i++) programs[i] = programs[0];
+            try
+            {
+                RunOnMain(() => gadget.SetPrograms(programs));
+                var station = gadget.station;
+                if (station != null && station.battery != null)
+                    RunOnMain(() => station.battery.AddLiquid(Identifiable.Id.WATER_LIQUID, 1f));
+            }
+            catch (Exception e)
+            {
+                UMFLog.Log("[SlimeBridge] drone program err: " + e.Message);
+                return false;
+            }
+            return true;
         }
 
-        private bool FillDroneProgram(object slot, int index)
+        private static DroneMetadata.Program.Behaviour FindBehaviour(DroneMetadata.Program.Behaviour[] list, string id)
         {
-            var flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic;
-            string sourceName = index == 0 ? "DroneProgramSourceCorral" : "DroneProgramSourceGarden";
-            string destName = index == 0 ? "DroneProgramDestinationPlortMarket" : "DroneProgramDestinationFeeder";
-            string target = index == 0 ? "PINK_PLORT" : "CARROT_VEGGIE";
-            bool wrote = false;
-            foreach (var f in slot.GetType().GetFields(flags))
-            {
-                string n = f.Name.ToLowerInvariant();
-                try
-                {
-                    if (f.FieldType == typeof(string))
-                    {
-                        if (n.IndexOf("source") >= 0) { f.SetValue(slot, sourceName); wrote = true; }
-                        else if (n.IndexOf("dest") >= 0) { f.SetValue(slot, destName); wrote = true; }
-                        else if (n.IndexOf("target") >= 0) { f.SetValue(slot, target); wrote = true; }
-                    }
-                    else if (n.IndexOf("source") >= 0 || n.IndexOf("dest") >= 0)
-                    {
-                        string typeName = n.IndexOf("source") >= 0 ? sourceName : destName;
-                        object created = CreateGameType(typeName);
-                        if (created != null && f.FieldType.IsInstanceOfType(created))
-                        {
-                            f.SetValue(slot, created);
-                            wrote = true;
-                        }
-                    }
-                }
-                catch (Exception) { }
-            }
-            return wrote;
+            if (list == null) return null;
+            foreach (var b in list)
+                if (b != null && b.id == id) return b;
+            return null;
         }
 
-        private object CreateGameType(string name)
+        private static DroneMetadata.Program.Target FindTarget(DroneMetadata.Program.Target[] list, string key)
         {
-            System.Type t = FindGameType(name);
-            if (t == null || t.IsAbstract) return null;
-            try { return Activator.CreateInstance(t); }
-            catch (Exception) { return null; }
+            if (list == null) return null;
+            foreach (var t in list)
+            {
+                if (t == null || string.IsNullOrEmpty(t.id)) continue;
+                if (t.id == key || t.id.IndexOf(key, StringComparison.OrdinalIgnoreCase) >= 0) return t;
+            }
+            return null;
         }
 
         private System.Type FindGameType(string name)
@@ -2292,13 +2408,27 @@ namespace SlimeBridge
             object ammoPre = PlayerAmmo();
             Identifiable.Id id = Identifiable.Id.NONE; int cnt = 0;
             bool fromBag = false;
+            bool indexedCorral = kind != null && kind.StartsWith("corral@");
+            Identifiable.Id wantedFood = Identifiable.Id.NONE;
+            string dietNote = "";
+            if (indexedCorral)
+            {
+                wantedFood = FoodForCorral(kind, out dietNote);
+                if (wantedFood == Identifiable.Id.NONE)
+                {
+                    ar.ok = false;
+                    ar.note = dietNote;
+                    return;
+                }
+            }
             if (ammoPre != null)
             {
-                bool wantFood = (kind == "corral");
+                bool wantFood = (kind == "corral" || indexedCorral);
                 if (_lastGrabbedId != Identifiable.Id.NONE)
                 {
                     object c = RunOnMain(() => AmmoCall(ammoPre, "GetCount", new object[] { _lastGrabbedId }));
-                    bool matches = wantFood ? IsFood(_lastGrabbedId) : PLORT_IDS.Contains(_lastGrabbedId);
+                    bool matches = indexedCorral ? _lastGrabbedId == wantedFood
+                        : (wantFood ? IsFood(_lastGrabbedId) : PLORT_IDS.Contains(_lastGrabbedId));
                     if (matches && c is int && (int)c > 0) id = _lastGrabbedId;
                 }
                 if (id == Identifiable.Id.NONE)
@@ -2318,7 +2448,8 @@ namespace SlimeBridge
                         try
                         {
                             var sid = (Identifiable.Id)System.Enum.Parse(typeof(Identifiable.Id), nm.ToString(), false);
-                            bool matches = wantFood ? IsFood(sid) : PLORT_IDS.Contains(sid);
+                            bool matches = indexedCorral ? sid == wantedFood
+                                : (wantFood ? IsFood(sid) : PLORT_IDS.Contains(sid));
                             if (!matches) continue;
                             object c2 = RunOnMain(() => AmmoCall(ammoPre, "GetSlotCount", new object[] { si }));
                             if (c2 is int && (int)c2 > 0) id = sid;
@@ -2328,9 +2459,25 @@ namespace SlimeBridge
                 }
                 if (id == Identifiable.Id.NONE)
                 {
-                    ar.ok = false; ar.note = "真实物品栏里没有可投掷的" + (kind == "corral" ? "食物" : "结晶");
+                    ar.ok = false;
+                    ar.note = indexedCorral
+                        ? dietNote + "，背包里没有这种食物"
+                        : "真实物品栏里没有可投掷的" + (wantFood ? "食物" : "结晶");
                     return;
                 }
+            }
+            else if (indexedCorral)
+            {
+                int haveBag = _bag.ContainsKey(wantedFood) ? _bag[wantedFood] : 0;
+                if (haveBag <= 0)
+                {
+                    ar.ok = false;
+                    ar.note = dietNote + "，背包里没有这种食物";
+                    return;
+                }
+                id = wantedFood;
+                cnt = haveBag;
+                fromBag = true;
             }
             else if (_bag.Count > 0)
             {
@@ -2349,7 +2496,7 @@ namespace SlimeBridge
                 object hL = RunOnMain(() => AmmoCall(ammoL, "GetCount", new object[] { id }));
                 int haveL = hL is int ? (int)hL : 0;
                 if (haveL <= 0) { ar.ok = false; ar.note = "真实物品栏里没有 " + id; return; }
-                if (kind != "corral")
+                if (kind != "corral" && !indexedCorral)
                 {
                     int priceL = 0;
                     try
@@ -2433,7 +2580,7 @@ namespace SlimeBridge
                 if (spawned)
                 {
                     ar.ok = true; ar.caught = id.ToString();
-                    ar.note = "已从枪口发射 " + id + "(真实物品栏" + haveL + ">"
+                    ar.note = (indexedCorral ? dietNote + "。" : "") + "已从枪口发射 " + id + "(真实物品栏" + haveL + ">"
                               + (RunOnMain(() => AmmoCall(ammoL, "GetCount", new object[] { id })) ?? "?")
                               + ",真实物理弹出) 飞向准星方向";
                     return;
@@ -2442,7 +2589,7 @@ namespace SlimeBridge
             }
             // Ammo 不可用：退回台账模式
             // 市场结算走游戏原生经济系统(EconomyDirector)：真实市价(含饱和度) + RegisterSold
-            if (kind != "corral")
+            if (kind != "corral" && !indexedCorral)
             {
                 int price = 0;
                 try
@@ -2473,9 +2620,10 @@ namespace SlimeBridge
             }
             // 目标：market=投入口(抬高开孔)；corral=最近围栏中心上方
             Vector3 target;
-            if (kind == "corral")
+            if (kind == "corral" || indexedCorral)
             {
-                LandPlot plot = FindPlotOfKind("corral");
+                int plotCount;
+                LandPlot plot = indexedCorral ? FindCorralByIndex(CorralIndex(kind), out plotCount) : FindPlotOfKind("corral");
                 if (plot == null) { ar.ok = false; ar.note = "没有围栏可投"; return; }
                 target = plot.transform.position + Vector3.up * 0.6f;
             }
@@ -2534,7 +2682,7 @@ namespace SlimeBridge
                 // 近距离（市场投入口/围栏）抛物线弹道难以命中：市场掉口边地上、
                 // 围栏直接飞越围墙扔到栏外（实测）。改为从目标正上方落下——
                 // 市场=穿过结算碰撞体；围栏=落进栏内被史莱姆吃到。
-                origin = target + Vector3.up * (kind == "corral" ? 2.2f : 0.3f);
+                origin = target + Vector3.up * ((kind == "corral" || indexedCorral) ? 2.2f : 0.3f);
                 vel = Vector3.down * 2f;
             }
             else
@@ -2558,7 +2706,7 @@ namespace SlimeBridge
             if (_bag[id] <= 0) _bag.Remove(id);
             ar.ok = true;
             ar.caught = id.ToString();
-            ar.note = "已从枪口投出 " + id + " 飞向" + (kind == "corral" ? "围栏" : "结晶市场")
+            ar.note = "已从枪口投出 " + id + " 飞向" + ((kind == "corral" || indexedCorral) ? "围栏" : "结晶市场")
                       + "（真实物理），台账余 " + _bag.Count + " 种";
         }
 
