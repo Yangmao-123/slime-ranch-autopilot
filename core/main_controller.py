@@ -227,18 +227,11 @@ class Brain:
             if self.ticks % 5 == 4:
                 self._infra_step()
             return
-        # 2026-10-18 需求：售卖改为玩家文字指令驱动（模仿猫娘计划其他插件的指令交互）。
-        # 经营循环只负责：自动收集围栏结晶 → 回结晶市场待命；卖什么由玩家聊天告诉
-        # NEKO（Agent 调 sell_plorts 入口 → sell_request 指令），卖完 5s 指令窗口内
-        # 继续听吩咐，没有新指令就呆在结晶市场。
-        got = self.walk.collect_plorts_here()
-        self._say("collect" if got.get("ok") else "no-collect",
-                  f"【自主】{got.get('note', '')}", every=3 if got.get("ok") else 6)
-        if hasattr(self.io, "tp_market"):
-            self.io.tp_market()   # 收完回结晶市场待命（没收到结晶时 mod 也会自己回）
+        # 2026-10-18 需求（第二轮）：完全指令驱动——玩家说卖哪种结晶之前**不收集**。
+        # 待命态：人停在结晶市场等指令；收到售卖指令后才瞬移围栏收集→回市场卖出。
         self._say("wait-market",
-                  "【自主】已在结晶市场待命，要卖哪种结晶直接告诉我（例：卖粉色结晶 / 卖全部结晶）",
-                  every=10)
+                  "【自主】在结晶市场待命；要卖哪种结晶直接说（例：卖粉色结晶 / 卖全部结晶），"
+                  "我这就去收来卖～", every=10)
         if self.ticks % 5 == 4:
             self._infra_step()
 
@@ -519,7 +512,8 @@ class Brain:
             time.sleep(min(0.5, remain))
 
     def _do_sell_request(self, what: str) -> None:
-        """玩家文字售卖指令：解析种类 → 瞬移市场按当日市价卖出 → 进入 5s 指令窗口。"""
+        """玩家文字售卖指令：先瞬移围栏收集结晶，再回市场按当日市价卖出指定种类，
+        然后进入 5s 指令窗口（窗口内继续听吩咐，没有就呆在结晶市场）。"""
         if self.mode != "ranch":
             self.c.say("【售卖】现在不是自主经营模式哦；按 V 进入自主经营后，再告诉我要卖什么结晶～")
             return
@@ -528,13 +522,21 @@ class Brain:
             self.c.say("【售卖】没听懂「" + (what or "") + "」是哪种结晶。"
                        "可以说：卖粉色结晶、卖荧光结晶……或者 卖全部结晶")
             return
+        # 1) 先去围栏收集（说卖之前不收集——指令到了才动）
+        self._say("sell-collect", "【售卖】收到！先去围栏收集结晶，马上回来卖～", every=1)
+        collected = self.walk.collect_plorts_here()
+        collect_note = str(collected.get("note", ""))
+        # 2) 回结晶市场按指令卖出
         res = self.walk.sell_kind(pid)
         if res.get("ok"):
             self._sell_wait_until = time.time() + 5.0
-            self.c.say("【售卖】" + str(res.get("note", ""))
+            note = str(res.get("note", ""))
+            extra = ("（" + collect_note + "）") if collect_note else ""
+            self.c.say("【售卖】" + note + extra
                        + " 5秒内可以继续吩咐；没有的话我就呆在结晶市场等你～")
         else:
-            self.c.say("【售卖】" + str(res.get("note", "")))
+            self.c.say("【售卖】" + str(res.get("note", ""))
+                       + (("；刚收集的情况：" + collect_note) if collect_note else ""))
 
     def _handle_command(self, cmd) -> None:
         t = cmd.get("type")
