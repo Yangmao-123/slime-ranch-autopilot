@@ -354,9 +354,12 @@ class Brain:
                              slimes=list(self.ranch.known_slimes))
             self._push_overlay()
             if self.walk:
-                # 循环时间（面板可改，默认 30s）：从本轮开始计（含循环执行耗时）
-                rest = float(getattr(self.s, "cycle_seconds", 30)) - (time.time() - t0)
-                time.sleep(max(1.0, rest))
+                if not self._market_ready:
+                    time.sleep(1.0)   # 重置阶段（瞬移到市场）不算循环间隔，立刻进第一轮
+                else:
+                    # 循环时间（面板可改，默认 30s）：从本轮开始计（含循环执行耗时）
+                    rest = float(getattr(self.s, "cycle_seconds", 30)) - (time.time() - t0)
+                    time.sleep(max(1.0, rest))
             else:
                 time.sleep(self._interval())
 
