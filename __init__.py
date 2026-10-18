@@ -125,7 +125,8 @@ class SlimeRanchAutopilotPlugin(NekoPluginBase):
             os.makedirs(self._runtime_dir, exist_ok=True)
         except Exception:
             pass
-        self._seen_msg: int = 0
+        self._outbox_offset: int = 0
+        self._outbox_retrying = False
 
     # ------------------------------------------------------------------ 生命周期
     @lifecycle(id="startup", name="启动", description="启动时同步配置（不自动拉起自动化核心，需手动点「启动自动游玩」）")
@@ -141,7 +142,7 @@ class SlimeRanchAutopilotPlugin(NekoPluginBase):
         except Exception:
             pass
         self._sync_config_to_disk()
-        self._archive_outbox()
+        self._prepare_outbox()
         self._poll_task = asyncio.create_task(self._poll_outbox_loop())
         # 插件被激活/随总开关启动时，不再自动拉起自动化核心：
         # 核心只在用户在面板点「启动自动游玩」(start_autopilot) 时才 spawn，
@@ -237,25 +238,39 @@ class SlimeRanchAutopilotPlugin(NekoPluginBase):
         except Exception:
             pass
 
-    def _archive_outbox(self) -> None:
-        """启动时把上一轮的 outbox 挪走，避免历史消息被重新念一遍。"""
-        self._seen_msg = 0
+    def _prepare_outbox(self) -> None:
+        """恢复已提交位置；首次迁移时归档旧日志，此后保留尚未提交的消息。"""
+        self._outbox_offset = 0
         if not self._runtime_dir:
             return
-        path = os.path.join(self._runtime_dir, "outbox.jsonl")
-        if not os.path.exists(path) or os.path.getsize(path) == 0:
+        cursor = os.path.join(self._runtime_dir, "outbox.cursor.json")
+        if os.path.exists(cursor):
+            try:
+                with open(cursor, encoding="utf-8") as f:
+                    self._outbox_offset = max(0, int(json.load(f)["offset"]))
+            except Exception:
+                self.logger.warning("无法恢复消息提交位置，将重新尝试未确认的消息")
             return
+        path = os.path.join(self._runtime_dir, "outbox.jsonl")
         dest = os.path.join(self._runtime_dir, "outbox.prev.jsonl")
         try:
-            if os.path.exists(dest):
-                os.remove(dest)
-            os.replace(path, dest)
+            if os.path.exists(path) and os.path.getsize(path):
+                os.replace(path, dest)
+            self._ack_outbox(0)
         except Exception:
-            pass
+            self.logger.warning("初始化消息提交位置失败")
+
+    def _ack_outbox(self, offset: int) -> None:
+        """只在 SDK 接受本地提交后推进游标；磁盘写入失败时允许重试。"""
+        path = os.path.join(self._runtime_dir, "outbox.cursor.json")
+        with open(path + ".tmp", "w", encoding="utf-8") as f:
+            json.dump({"offset": offset}, f)
+        os.replace(path + ".tmp", path)
+        self._outbox_offset = offset
 
     # ------------------------------------------------------------------ 出站消息
-    def _poll_outbox(self) -> list[dict]:
-        """读取核心写出的 outbox.jsonl 中尚未推送的消息。"""
+    def _poll_outbox(self) -> list[tuple[int, dict]]:
+        """读取未确认的完整行，返回每行结束的字节位置，不提前确认。"""
         out = []
         if not self._runtime_dir:
             return out
@@ -263,17 +278,20 @@ class SlimeRanchAutopilotPlugin(NekoPluginBase):
         if not os.path.exists(path):
             return out
         try:
-            with open(path, "r", encoding="utf-8") as f:
-                lines = f.readlines()
-            for i in range(self._seen_msg, len(lines)):
-                line = lines[i].strip()
-                if not line:
-                    continue
-                try:
-                    out.append(json.loads(line))
-                except Exception:
-                    continue
-            self._seen_msg = len(lines)
+            with open(path, "rb") as f:
+                if os.fstat(f.fileno()).st_size < self._outbox_offset:
+                    self._ack_outbox(0)
+                f.seek(self._outbox_offset)
+                while len(out) < 100:
+                    line = f.readline()
+                    if not line or not line.endswith(b"\n"):
+                        break  # 核心可能正在写这一行，留到下一次读取。
+                    try:
+                        item = json.loads(line.decode("utf-8"))
+                    except (ValueError, UnicodeError):
+                        item = {}
+                        self.logger.warning("跳过格式无效的核心消息行")
+                    out.append((f.tell(), item if isinstance(item, dict) else {}))
         except Exception:
             pass
         return out
@@ -281,27 +299,42 @@ class SlimeRanchAutopilotPlugin(NekoPluginBase):
     async def _poll_outbox_loop(self) -> None:
         while True:
             try:
-                for item in self._poll_outbox():
-                    self._relay(item)
+                self._drain_outbox()
             except Exception:
-                pass
+                self._warn_outbox_retry()
             await asyncio.sleep(1.0)
 
-    def _relay(self, item: dict) -> None:
-        kind = item.get("kind", "info")
+    def _drain_outbox(self) -> None:
+        for offset, item in self._poll_outbox():
+            if not self._relay(item):
+                self._warn_outbox_retry()
+                break
+            self._ack_outbox(offset)
+            if self._outbox_retrying:
+                self.logger.info("核心消息已恢复本地提交")
+                self._outbox_retrying = False
+
+    def _warn_outbox_retry(self) -> None:
+        if not self._outbox_retrying:
+            self.logger.warning("消息提交暂不可用，将保留消息重试")
+            self._outbox_retrying = True
+
+    def _relay(self, item: dict) -> bool:
         text = item.get("text", "")
         if not text:
-            return
+            return True
         try:
-            self.push_message(
+            result = self.push_message(
                 source="slime_ranch_autopilot",
                 visibility=[],
                 ai_behavior="respond",
                 parts=[{"type": "text", "text": text}],
                 priority=5,
             )
+            # submitted 只代表 SDK 本地接收，不能当作生成或播放完成。
+            return isinstance(result, dict) and result.get("submitted") is True
         except Exception:
-            pass
+            return False
 
     # ------------------------------------------------------------------ Hosted UI
     @ui.context(id="dashboard")

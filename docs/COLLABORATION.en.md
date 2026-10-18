@@ -30,7 +30,7 @@ Change both `GameState.cs` and `core/bridge.py`, and register the new name in `f
 
 ## Runtime rules
 
-Teleport sets the body facing only. The camera must be turned with the mouse using `AimForward()`. Walking, looking, and menu clicks use real input. Vacuum and throw do not: the locked cursor ignores injected mouse buttons, so those go through the game API. Dismiss the pause menu before acting, and do not announce that dismissal. On startup the plugin archives `outbox.jsonl` to `outbox.prev.jsonl` so old lines are not spoken again.
+Teleport sets the body facing only. The camera must be turned with the mouse using `AimForward()`. Walking, looking, and menu clicks use real input. Vacuum and throw do not: the locked cursor ignores injected mouse buttons, so those go through the game API. Dismiss the pause menu before acting, and do not announce that dismissal. The first upgrade archives old `outbox.jsonl` as `outbox.prev.jsonl`; subsequent starts restore SDK-accepted positions from `outbox.cursor.json` and retry pending messages. Local acceptance is not playback confirmation.
 
 ## Deploy
 

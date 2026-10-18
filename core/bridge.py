@@ -437,15 +437,29 @@ class BridgeIOController:
         out: Dict[str, Any] = {"ok": bool(res.get("ok")), "note": res.get("note", ""),
                                "zone": res.get("area", ""),
                                "slimes": [], "plorts": [], "foods": []}
+        if not out["ok"]:
+            return out
         try:
-            payload = json.loads(res.get("payload") or "{}")
+            payload = json.loads(res.get("payload") or "")
+            if not isinstance(payload, dict):
+                raise ValueError("invalid scan payload")
             out["zone"] = payload.get("zone") or out["zone"]
+            if not isinstance(out["zone"], str):
+                raise ValueError("invalid scan zone")
             for key in ("slimes", "plorts", "foods"):
-                items = payload.get(key) or []
-                out[key] = [{"id": str(i.get("id", "")), "n": int(i.get("n", 0))}
-                            for i in items if isinstance(i, dict)]
+                items = payload[key]
+                if not isinstance(items, list):
+                    raise ValueError("invalid scan items")
+                counts: Dict[str, int] = {}
+                for item in items:
+                    if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+                        raise ValueError("invalid scan item")
+                    count = int(item["n"])
+                    if item["id"] and count > 0:
+                        counts[item["id"]] = counts.get(item["id"], 0) + count
+                out[key] = [{"id": sid, "n": count} for sid, count in sorted(counts.items())]
         except Exception:
-            pass
+            out.update(ok=False, note="周边扫描数据无效，请更新 SlimeBridge")
         return out
 
     def ranch_cycle(self) -> Dict[str, Any]:

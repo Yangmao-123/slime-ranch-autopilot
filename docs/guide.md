@@ -4,7 +4,7 @@
 NEKO 连接插件后，默认**观望**，不操作游戏。按键如下：
 
 - **V 键**：在观望和自主经营之间切换。Windows 上优先用系统键盘钩子，装了 `pynput` 时作兜底。中文输入法下也能收到 V。
-  - **观望（默认）**：不按键、不走路、不主动说话。要猫娘看见画面，请自己打开 NEKO 的屏幕分享。
+  - **观望（默认）**：不按键、不走路；连接 SlimeBridge 后立即扫描玩家周围 30 米，之后每 8 秒扫描一次。首次扫描及周边物种、数量、食物、结晶或区域变化时汇报，未变化时保持安静。金、幸运、水银史莱姆每种最多每 60 秒提醒一次。此扫描不依赖屏幕分享。
   - **自主经营**：每个操作先瞬移到对应地点再执行。一轮只做一件事。
 
 自主经营一轮做这些事：
@@ -27,7 +27,7 @@ py -3 run_standalone.py --ticks 20 --interval 0 --backend sim
 py -3 -m unittest discover -s tests
 ```
 
-日志在 `%TEMP%\neko-slime-ranch-autopilot\runtime\outbox.jsonl`。插件重新启动时，上一轮日志会挪到 `outbox.prev.jsonl`，不会再念一遍。
+日志在 `%TEMP%\neko-slime-ranch-autopilot\runtime\outbox.jsonl`。首次升级会把旧日志归档为 `outbox.prev.jsonl`；之后通过 `outbox.cursor.json` 保存 SDK 已接受的提交位置，失败的消息每秒重试，重启后继续。SDK 接受只代表本地提交成功，不代表 AI 已生成回复或语音已播放；提交成功但游标尚未落盘就中断时，可能重复提交一条消息。
 
 ## 三、安装到 NEKO
 在仓库根目录双击 `install.bat`，或执行：

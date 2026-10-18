@@ -24,7 +24,7 @@
 ### P1 —— 稳定性打磨
 
 - [x] **自动保存常态化**：每 8 轮经营调用 `save_now`
-- [x] **outbox 重放修复**：插件启动时把旧 `outbox.jsonl` 挪成 `outbox.prev.jsonl`
+- [x] **outbox 提交恢复**：首次升级归档旧日志，之后用 `outbox.cursor.json` 记录 SDK 接受的位置，失败重试、重启续传；不以本地提交代替播放确认
 - [x] **视觉层修复**：`capture_window` 改为抓客户区，和点击用同一套矩形
 - [x] **建造菜单设施切换**：`menu_texts` 带上 sx/sy，购买前按文字点对应设施/升级件。点击链路未实机走查
 

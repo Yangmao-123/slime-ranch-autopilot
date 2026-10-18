@@ -54,7 +54,7 @@ SLIME_NAMES = {
     "GOLD_SLIME": "金史莱姆", "LUCKY_SLIME": "幸运史莱姆", "QUICKSILVER_SLIME": "水银史莱姆",
 }
 RARE_SLIMES = {"GOLD_SLIME", "LUCKY_SLIME", "QUICKSILVER_SLIME"}
-WATCH_SCAN_EVERY = 4   # 每 4 个观望循环扫一次周边（sim_interval 2s → 约 8 秒一次）
+WATCH_SCAN_SECONDS = 8.0
 
 
 class Brain:
@@ -72,6 +72,11 @@ class Brain:
         self._drone_checked = False
         self._drones_on = False
         self._corral_i = 0
+        self._watch_due = 0.0
+        self._watch_snapshot = None
+        self._rare_reported: dict[str, float] = {}
+        self._watch_error = ""
+        self._watch_error_at = float("-inf")
         self._hotkey = HotkeyListener(on_toggle=self._on_hotkey)
         # 后端选择
         if settings.backend == "live" and os.path.exists(settings.game_exe):
@@ -143,6 +148,8 @@ class Brain:
         self._drone_checked = False
         self._drones_on = False
         self._said.clear()
+        self._watch_due = 0.0
+        self._watch_snapshot = None
         if self.walk:
             if mode == "ranch":
                 self.walk.clear_abort()
@@ -241,57 +248,64 @@ class Brain:
 
     # ------------------------------------------------------------ 观望：周边感知
     def _watch_tick(self) -> None:
-        """观望模式：定期扫玩家周边，主动汇报新发现。
-
-        新物种(跨会话持久 discoveries.json)/稀有史莱姆(金/幸运/水银,每次都喊,
-        限频)/首次进入的区域。NEKO 只在"有新东西"时开口，不闲聊。
-        """
+        """每 8 秒采集周边快照；图鉴只决定首次发现措辞，不屏蔽周边变化。"""
         if not hasattr(self.io, "scan_near"):
             return
-        self._watch_scans = getattr(self, "_watch_scans", 0) + 1
-        if self._watch_scans % WATCH_SCAN_EVERY != 1:   # 第一次立即扫，之后每 4 轮
+        now = time.monotonic()
+        if now < self._watch_due:
             return
+        # 以扫描开始时刻计时；主循环扣除 I/O 耗时，不补跑积压的扫描。
+        self._watch_due = now + WATCH_SCAN_SECONDS
         try:
             near = self.io.scan_near(30.0)
         except Exception:
+            self._report_watch_error("周边扫描连接异常，请检查游戏和 SlimeBridge", now)
             return
         if not near.get("ok"):
+            self._report_watch_error(
+                "周边扫描不可用，请确认已进入存档，且 SlimeBridge 已更新并支持 scan_near", now)
             return
+        self._watch_error = ""
         disc = self._load_discoveries()
-        # 1) 稀有史莱姆：出现就喊（限频，同种 60 秒内不重复）
-        for s in near.get("slimes", []):
-            sid = s.get("id", "")
-            if sid in RARE_SLIMES:
-                name = SLIME_NAMES.get(sid, sid)
-                self._say("rare-" + sid,
-                          f"【稀有】{name}出现了！！就在附近，快看快看！", every=30)
-        # 2) 新物种：第一次见到才记（持久化，下次启动不会再报）
-        new_species = []
-        for s in near.get("slimes", []):
-            sid = s.get("id", "")
-            if sid and sid not in RARE_SLIMES and sid not in disc["seen_slimes"]:
-                disc["seen_slimes"].append(sid)
-                new_species.append((sid, s.get("n", 1)))
-        # 3) 首次进入的区域
+        slimes = near.get("slimes", [])
+        new_species = [s["id"] for s in slimes
+                       if s.get("id") and s["id"] not in disc["seen_slimes"]]
         zone = near.get("zone", "")
         new_zone = bool(zone) and zone not in disc["zones"]
+        snapshot = (zone, *(tuple(sorted((s["id"], s["n"]) for s in near.get(key, [])))
+                            for key in ("slimes", "plorts", "foods")))
+        rare = [s["id"] for s in slimes if s.get("id") in RARE_SLIMES
+                and now - self._rare_reported.get(s["id"], float("-inf")) >= 60.0]
+        if snapshot == self._watch_snapshot and not rare:
+            return
+        parts = []
+        if rare:
+            parts.append("【稀有】附近出现了" + "、".join(SLIME_NAMES[s] for s in rare) + "！")
+        if new_zone:
+            parts.append(f"【探索】首次来到「{zone}」。")
+        elif zone:
+            parts.append(f"当前区域：{zone}。")
+        if new_species:
+            parts.append("第一次见到" + "、".join(SLIME_NAMES.get(s, s) for s in new_species) + "。")
+        parts.append("玩家周围30米" + (self._near_summary(near) or "内没有扫描到史莱姆、结晶或食物") + "。")
+        # 只产生一条事件；先可靠写入 outbox，再推进快照与图鉴。
+        if not self.c.report_discovery(f"watch-{time.time_ns()}", "".join(parts)):
+            return
+        self._watch_snapshot = snapshot
+        for sid in rare:
+            self._rare_reported[sid] = now
+        disc["seen_slimes"].extend(new_species)
         if new_zone:
             disc["zones"].append(zone)
         if new_species or new_zone:
             self._save_discoveries()
-        # 4) 开口汇报
-        if new_species:
-            parts = "、".join(f"「{SLIME_NAMES.get(sid, sid)}」×{n}" for sid, n in new_species)
-            self.c.say(f"【新发现】第一次见到{parts}！NEKO 记下来啦～")
-            self.c.report_discovery(
-                "species-" + "-".join(sid for sid, _ in new_species) + f"-{self.ticks}",
-                "新物种：" + parts)
-        elif new_zone:
-            summary = self._near_summary(near)
-            self.c.say(f"【探索】来到了「{zone}」{summary}")
-            self.c.report_discovery(f"zone-{zone}", f"探索新区域：{zone}")
-        # 面板上的史莱姆列表同步为已发现的物种
         self.ranch.known_slimes = [SLIME_NAMES.get(s, s) for s in disc["seen_slimes"]]
+
+    def _report_watch_error(self, text: str, now: float) -> None:
+        if text != self._watch_error or now - self._watch_error_at >= 60.0:
+            if self.c.emit("warning", text):
+                self._watch_error = text
+                self._watch_error_at = now
 
     def _near_summary(self, near) -> str:
         bits = []
@@ -314,14 +328,20 @@ class Brain:
                     self._disc = json.load(f)
             except Exception:
                 self._disc = {}
-            self._disc.setdefault("seen_slimes", [])
-            self._disc.setdefault("zones", [])
+            if not isinstance(self._disc, dict):
+                self._disc = {}
+            for key in ("seen_slimes", "zones"):
+                items = self._disc.get(key)
+                self._disc[key] = (list(dict.fromkeys(s for s in items if isinstance(s, str)))
+                                   if isinstance(items, list) else [])
         return self._disc
 
     def _save_discoveries(self) -> None:
         try:
-            with open(os.path.join(self.s.data_dir, "discoveries.json"), "w", encoding="utf-8") as f:
+            path = os.path.join(self.s.data_dir, "discoveries.json")
+            with open(path + ".tmp", "w", encoding="utf-8") as f:
                 json.dump(self._disc, f, ensure_ascii=False, indent=1)
+            os.replace(path + ".tmp", path)
         except Exception:
             pass
 
@@ -437,6 +457,7 @@ class Brain:
                 break
 
             if self.mode != "ranch":
+                t0 = time.monotonic()
                 self.ticks += 1
                 self._watch_tick()
                 self.c.set_state(mode="watch", phase="watching",
@@ -444,7 +465,10 @@ class Brain:
                                  infra=dict(self.ranch.level),
                                  slimes=list(self.ranch.known_slimes))
                 self._push_overlay()
-                time.sleep(self._interval())
+                now = time.monotonic()
+                poll_rest = max(0.0, self._interval() - (now - t0))
+                scan_rest = max(0.0, self._watch_due - now) if self._watch_due else poll_rest
+                time.sleep(max(0.01, min(poll_rest, scan_rest)))
                 continue
 
             t0 = time.time()
