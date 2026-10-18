@@ -323,13 +323,25 @@ class SlimeRanchAutopilotPlugin(NekoPluginBase):
         text = item.get("text", "")
         if not text:
             return True
+        kind = str(item.get("kind", "info"))
+        # 分级投递（对齐 game_agent_minecraft 的做法）：
+        # - respond：强制 NEKO 立刻开口——受会话主动额度限制（实测 2 条/会话，
+        #   Agent 日志 "skip proactive: per-session cap reached"），只给高价值
+        #   事件：新物种/稀有史莱姆/首次进入新区域。
+        # - read：注入对话上下文不逼回复——LLM 在用户下次聊天时自然看到最新
+        #   牧场动态，零额度消耗。扫描快照/经营汇报/告警全走这条路。
+        #   （旧版全部 respond：头两条把额度烧光，之后每条都被拦，NEKO 沉默。）
+        high_value = ("第一次见到" in text or "【稀有】" in text or "首次来到" in text)
+        behavior = "respond" if (high_value and kind == "discovery") else "read"
         try:
             result = self.push_message(
                 source="slime_ranch_autopilot",
                 visibility=[],
-                ai_behavior="respond",
+                ai_behavior=behavior,
                 parts=[{"type": "text", "text": text}],
-                priority=5,
+                priority=5 if behavior == "respond" else 4,
+                # 排队合并：LLM 忙时旧快照作废、只念最新，避免背诵积压流水账
+                coalesce_key="sr_watch" if behavior == "read" else None,
             )
             # submitted 只代表 SDK 本地接收，不能当作生成或播放完成。
             return isinstance(result, dict) and result.get("submitted") is True
