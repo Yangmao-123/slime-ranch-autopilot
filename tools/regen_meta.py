@@ -45,9 +45,9 @@ def main() -> int:
         "print('meta written:', p)" % (NEKO_ROOT, INSTALL, INSTALL)
     )
     r = subprocess.run([str(NEKO_PY), "-c", code], capture_output=True, text=True)
-    out = (r.stdout + r.stderr).strip()
+    out = ((r.stdout or "") + (r.stderr or "")).strip()
     print(out[-400:])
-    if r.returncode != 0 or "meta written" not in r.stdout:
+    if r.returncode != 0 or "meta written" not in (r.stdout or ""):
         print("[ERR] meta 推导失败")
         return 1
 
@@ -62,6 +62,16 @@ def main() -> int:
         if m:
             ports.append(int(m.group(1)))
     for port in sorted(set(ports), reverse=True):
+        # 便宜的探针：1.5s 拿 openapi，先确认是带插件 reload 路由的端口
+        # （否则裸套接字端口会把 60s 超时吃满，探测会卡几分钟）
+        try:
+            with urllib.request.urlopen(
+                    f"http://127.0.0.1:{port}/openapi.json", timeout=1.5) as resp:
+                schema = resp.read().decode("utf-8", "replace")
+        except Exception:
+            continue
+        if "/plugin/{plugin_id}/reload" not in schema and "/plugins/reload" not in schema:
+            continue
         try:
             req = urllib.request.Request(
                 f"http://127.0.0.1:{port}/plugin/{PLUGIN_ID}/reload",
