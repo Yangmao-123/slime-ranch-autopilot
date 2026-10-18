@@ -535,6 +535,24 @@ class WalkCaptureIO:
         return {"ok": False, "gains": 0,
                 "note": "投进市场后资金没有增加，这次不算卖出"}
 
+    def sell_kind(self, kind_id: str = "") -> Dict[str, Any]:
+        """按玩家文字指令售卖（2026-10-18）：瞬移结晶市场，卖出指定种类
+        （kind_id 空=全部）的结晶——当日市价逐件结算，物品栏-1/资金+对应单价，
+        直到该种清零。售卖不再是自动行为，只由玩家指令触发。"""
+        self._dismiss_if_paused()
+        tp = self.io.tp_market() if hasattr(self.io, "tp_market") else {"ok": False, "note": "无法瞬移到市场"}
+        if not tp.get("ok"):
+            return {"ok": False, "gains": 0, "note": tp.get("note", "")}
+        time.sleep(0.3)
+        self._dismiss_if_paused()
+        if hasattr(self.io, "market_sell_all"):
+            res = self.io.market_sell_all(kind_id)
+            if res.get("ok"):
+                return {"ok": True, "gains": res.get("gains", 0),
+                        "note": "已按指令售出：{}".format(res.get("note", ""))}
+            return {"ok": False, "gains": 0, "note": res.get("note", "")}
+        return {"ok": False, "gains": 0, "note": "当前 mod 版本不支持按种类售卖，请更新 SlimeBridge"}
+
     def ranch_cycle(self) -> Dict[str, Any]:
         """完整经营循环（2026-10-18 用户定义，mod 端编排整个流程）：
         市场出发 → 挨个瞬移到围栏收取（收集器/地上）→ 物品栏满立刻回市场按当日

@@ -3,7 +3,7 @@
 [plugin]
 id = "slime_ranch_autopilot"
 name = "史莱姆牧场自动游玩"
-description = "让 NEKO 连接《史莱姆牧场》。默认观望，不操作游戏。按 V 键进入自主经营：从结晶市场出发，挨个围栏收结晶（收集器/地上），物品栏满立刻回市场按当日市价清仓再继续，直到没结晶；每轮间隔循环时间（默认30s，面板可改）。钱够费用两倍才建造或升级。"
+description = "让 NEKO 连接《史莱姆牧场》。观望模式：周边感知，主动汇报新发现。自主经营：自动收围栏结晶，但售卖由玩家文字指令驱动——聊天告诉 NEKO 卖什么结晶（如：卖粉色结晶/卖全部结晶），她去结晶市场按当日市价卖出，卖完 5 秒内继续听吩咐，否则呆在市场。钱够费用两倍才建造或升级。"
 version = "0.3.0"
 entry = "plugin.plugins.slime_ranch_autopilot:SlimeRanchAutopilotPlugin"
 type = "plugin"

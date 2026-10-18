@@ -26,7 +26,7 @@ from core.bridge import BridgeIOController  # noqa: E402
 from core.real import WalkCaptureIO  # noqa: E402
 from core.ranch import RanchState, decide_build_action, FACILITY_NAMES, record_built  # noqa: E402
 from core.voice import HotkeyListener  # noqa: E402
-from core.names import SLIME_NAMES, RARE_SLIMES  # noqa: E402
+from core.names import SLIME_NAMES, RARE_SLIMES, plort_id_from_text  # noqa: E402
 
 # 真实购买菜单的按钮关键词（中英双语：SR1 界面文字跟游戏语言走）。
 # 建造菜单(空地块购买页)三个按钮文字大致为 Corral/Coop/Garden 或 围栏/鸡舍/菜园。
@@ -60,6 +60,7 @@ class Brain:
         self._said: dict[str, tuple[str, int]] = {}
         self._overlay_last = ""
         self._sell_pending = False   # 背包里还有没卖掉的结晶（上轮售卖失败）
+        self._sell_wait_until = 0.0  # 售卖后的 5s 指令窗口截止时刻
         self._drone_checked = False
         self._drones_on = False
         self._corral_i = 0
@@ -226,16 +227,20 @@ class Brain:
             if self.ticks % 5 == 4:
                 self._infra_step()
             return
-        # 一轮 = 完整经营循环（mod 端编排：市场出发→挨个围栏收取→满包立刻回市场
-        # 按当日市价清仓再继续→直到地上/收集器没结晶→回市场门口等待）。
-        # 收食物与投喂已按需求取消；循环结束后按资金闸推进建造/升级。
-        cyc = self.walk.ranch_cycle()
-        if cyc.get("ok"):
-            self._sell_pending = False
-            self._say("cycle", f"【自主】{cyc.get('note', '')}", every=2)
-        else:
-            self._say("no-cycle", f"【自主】{cyc.get('note', '')}", every=4)
-        self._infra_step()
+        # 2026-10-18 需求：售卖改为玩家文字指令驱动（模仿猫娘计划其他插件的指令交互）。
+        # 经营循环只负责：自动收集围栏结晶 → 回结晶市场待命；卖什么由玩家聊天告诉
+        # NEKO（Agent 调 sell_plorts 入口 → sell_request 指令），卖完 5s 指令窗口内
+        # 继续听吩咐，没有新指令就呆在结晶市场。
+        got = self.walk.collect_plorts_here()
+        self._say("collect" if got.get("ok") else "no-collect",
+                  f"【自主】{got.get('note', '')}", every=3 if got.get("ok") else 6)
+        if hasattr(self.io, "tp_market"):
+            self.io.tp_market()   # 收完回结晶市场待命（没收到结晶时 mod 也会自己回）
+        self._say("wait-market",
+                  "【自主】已在结晶市场待命，要卖哪种结晶直接告诉我（例：卖粉色结晶 / 卖全部结晶）",
+                  every=10)
+        if self.ticks % 5 == 4:
+            self._infra_step()
 
     # ------------------------------------------------------------ 观望：周边感知
     def _watch_tick(self) -> None:
@@ -474,9 +479,10 @@ class Brain:
                 if not self._market_ready:
                     time.sleep(1.0)   # 重置阶段（瞬移到市场）不算循环间隔，立刻进第一轮
                 else:
-                    # 循环时间（面板可改，默认 30s）：从本轮开始计（含循环执行耗时）
+                    # 循环时间（面板可改，默认 30s）：从本轮开始计（含循环执行耗时）；
+                    # 等待期间持续接收指令（售卖指令 0.5s 内响应）
                     rest = float(getattr(self.s, "cycle_seconds", 30)) - (time.time() - t0)
-                    time.sleep(max(1.0, rest))
+                    self._command_aware_sleep(max(1.0, rest))
             else:
                 time.sleep(self._interval())
 
@@ -485,6 +491,50 @@ class Brain:
 
     def _interval(self) -> float:
         return self.s.sim_interval
+
+    # ------------------------------------------------------------ 指令驱动售卖
+    def _command_aware_sleep(self, seconds: float) -> None:
+        """等待期间持续接收指令（售卖指令立即执行）。
+
+        售卖完成后的 5s 指令窗口：窗口内不开始下一轮收集，人停在结晶市场；
+        新指令随时插入处理（0.5s 轮询 command.json）。窗口关闭且无新指令后
+        才恢复正常的循环节拍。
+        """
+        end = time.time() + max(0.2, seconds)
+        while True:
+            now = time.time()
+            wait_until = getattr(self, "_sell_wait_until", 0.0)
+            if wait_until > now and end < wait_until:
+                end = wait_until   # 指令窗口内保持待命，不进入下一轮收集
+            if now >= end:
+                return
+            while True:
+                cmd = self.c.read_command()
+                if not cmd:
+                    break
+                self._handle_command(cmd)
+            remain = end - time.time()
+            if remain <= 0:
+                return
+            time.sleep(min(0.5, remain))
+
+    def _do_sell_request(self, what: str) -> None:
+        """玩家文字售卖指令：解析种类 → 瞬移市场按当日市价卖出 → 进入 5s 指令窗口。"""
+        if self.mode != "ranch":
+            self.c.say("【售卖】现在不是自主经营模式哦；按 V 进入自主经营后，再告诉我要卖什么结晶～")
+            return
+        pid = plort_id_from_text(what)
+        if pid is None:
+            self.c.say("【售卖】没听懂「" + (what or "") + "」是哪种结晶。"
+                       "可以说：卖粉色结晶、卖荧光结晶……或者 卖全部结晶")
+            return
+        res = self.walk.sell_kind(pid)
+        if res.get("ok"):
+            self._sell_wait_until = time.time() + 5.0
+            self.c.say("【售卖】" + str(res.get("note", ""))
+                       + " 5秒内可以继续吩咐；没有的话我就呆在结晶市场等你～")
+        else:
+            self.c.say("【售卖】" + str(res.get("note", "")))
 
     def _handle_command(self, cmd) -> None:
         t = cmd.get("type")
@@ -499,10 +549,16 @@ class Brain:
         elif t == "set_cycle":
             self.s.cycle_seconds = max(5, int(cmd.get("seconds", getattr(self.s, "cycle_seconds", 30))))
             self.c.say(f"循环时间已更新为 {self.s.cycle_seconds}s")
+        elif t == "sell_request":
+            self._do_sell_request(str(cmd.get("what", "")))
         elif t == "command":
             text = cmd.get("text", "")
-            res = run_manual_command(self.io, text)
-            self.c.say(f"[指令] 「{text}」 -> {res.get('note','')}")
+            if text.strip().startswith("卖"):
+                # 面板「执行指令」也能触发：卖粉色结晶 / 卖全部结晶
+                self._do_sell_request(text.strip()[1:])
+            else:
+                res = run_manual_command(self.io, text)
+                self.c.say(f"[指令] 「{text}」 -> {res.get('note','')}")
 
 
 def main(argv=None) -> None:

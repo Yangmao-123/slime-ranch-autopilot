@@ -527,6 +527,32 @@ class SlimeRanchAutopilotPlugin(NekoPluginBase):
         summary = f"区域「{zone}」。" + ("；".join(parts) if parts else "附近30米内没有史莱姆、结晶或食物。")
         return Ok({"zone": zone, "summary": summary, **detail})
 
+    @plugin_entry(
+        id="sell_plorts",
+        name=tr("entries.sellplorts.name", default="售卖结晶"),
+        description=tr(
+            "entries.sellplorts.desc",
+            default="在《史莱姆牧场》自主经营模式下，按玩家指令到结晶市场售卖结晶。"
+                "玩家说\"卖粉色结晶\"\"把结晶卖了\"\"卖了全部结晶\"等时调用。"
+                "what 传结晶种类：粉色/岩石/虎斑/荧光/辐射/爆炸/蜂蜜/猎猫/水洼/量子/"
+                "旋风/马赛克/藤蔓/火焰/剑齿/全部。售卖按当日市价逐件结算。",
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "what": {"type": "string", "description": tr(
+                    "fields.sellWhat", default="结晶种类（如：粉色、荧光、全部）")},
+            },
+            "required": ["what"],
+        },
+    )
+    async def sell_plorts(self, what: str = "全部", **_):
+        """Agent 调用：把玩家的售卖指令转给核心执行（须在自主经营模式）。"""
+        what = (what or "").strip() or "全部"
+        self._write_command({"type": "sell_request", "what": what})
+        return Ok({"queued": True, "what": what,
+                   "note": f"已收到售卖指令：{what}（核心将在结晶市场执行）"})
+
     @ui.action(label=tr("actions.capture", default="校准截图"), refresh_context=True)
     @plugin_entry(
         id="capture_calibration",

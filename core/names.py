@@ -33,3 +33,37 @@ FOOD_NAMES = {
 def display_name(item_id: str) -> str:
     """史莱姆/结晶/食物 Id 转中文名；未知原样返回。"""
     return SLIME_NAMES.get(item_id) or PLORT_NAMES.get(item_id) or FOOD_NAMES.get(item_id) or item_id
+
+
+_ALL_WORDS = ("", "全部", "所有", "全部结晶", "所有结晶", "全都", "all")
+
+
+def plort_id_from_text(text: str):
+    """玩家售卖指令文字 → 结晶 Id。
+
+    返回：""=全部结晶；具体 Id 字符串（如 "PINK_PLORT"）；None=没听懂。
+    识别：中文名/去"结晶"短名/前缀/包含（"卖粉色结晶"整句也能解析出粉色）/
+    英文 Id 或短名（pink → PINK_PLORT）。
+    """
+    t = (text or "").strip()
+    if t in _ALL_WORDS:
+        return ""
+    up = t.upper().replace(" ", "_").replace("结晶", "_PLORT")
+    if up in PLORT_NAMES:
+        return up
+    if up + "_PLORT" in PLORT_NAMES:
+        return up + "_PLORT"
+    # 中文全名 / 去掉"结晶"的短名
+    for pid, cn in PLORT_NAMES.items():
+        if t == cn or t == cn.replace("结晶", ""):
+            return pid
+    # 前缀唯一命中（粉色/岩石/虎斑…）；整句包含（"卖粉色结晶"）
+    starts = [pid for pid, cn in PLORT_NAMES.items()
+              if cn.startswith(t) or cn.replace("结晶", "").startswith(t)]
+    if len(starts) == 1:
+        return starts[0]
+    contains = [pid for pid, cn in PLORT_NAMES.items()
+                if t and (t in cn or cn in t or cn.replace("结晶", "") in t)]
+    if len(contains) == 1:
+        return contains[0]
+    return None

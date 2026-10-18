@@ -419,9 +419,10 @@ class BridgeIOController:
         res = self._post_action("drone_setup")
         return {"ok": res.get("ok", False), "note": res.get("note", "无人机没有布置上")}
 
-    def market_sell_all(self) -> Dict[str, Any]:
-        """结晶市场批量清仓：按当日市价逐个扣物品栏结晶并加钱，直到清零。"""
-        res = self._post_action("market_sell_all")
+    def market_sell_all(self, kind: str = "") -> Dict[str, Any]:
+        """结晶市场批量清仓：kind 空=全部结晶，否则只卖该 Id（玩家指令驱动）。
+        按当日市价逐个扣物品栏结晶并加钱，直到该种清零。"""
+        res = self._post_action("market_sell_all", kind or "")
         return {"ok": res.get("ok", False), "gains": res.get("gains", 0),
                 "count": res.get("count", 0), "note": res.get("note", "清仓失败")}
 

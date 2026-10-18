@@ -521,7 +521,7 @@ namespace SlimeBridge
                     try
                     {
                         if (action == "ranch_cycle") RanchCycleReal(ar);
-                        else MarketSellAllReal(ar);
+                        else MarketSellAllReal(kind, ar);
                     }
                     catch (Exception e) { ar.ok = false; ar.note = "执行异常: " + e.Message; }
                     return ar;
@@ -566,7 +566,7 @@ namespace SlimeBridge
                             case "feed_show": FeedShowReal(kind, ar); break;
                             case "drone_setup": DroneSetupReal(ar); break;
                             case "cleanup_drones": CleanupDronesReal(ar); break;
-                            case "market_sell_all": MarketSellAllReal(ar); break;
+                            case "market_sell_all": MarketSellAllReal(kind, ar); break;
                             case "corral_collect": CorralCollectReal(kind, ar); break;
                             case "ranch_cycle": break;   // 已在分发旁路处理（HTTP 线程编排）
                             case "debug_types": DebugTypesReal(kind, ar); break;
@@ -2120,32 +2120,51 @@ namespace SlimeBridge
         // 结晶就给玩家 +当日单价，循环到物品栏结晶为 0。逐个 RegisterSold 进游戏经济
         // 系统（市价与饱和度真实变化），每件间隔 0.12s 让资金读数一格一格往上涨。
         // HTTP 线程编排：单件结算 RunOnMain 上主线程，休眠在 HTTP 线程，不冻结游戏。
-        private void MarketSellAllReal(ActionResult ar)
+        // kind 为空=全部结晶；kind 传结晶 Id(如 PINK_PLORT)则只卖该种（玩家指令驱动）。
+        private void MarketSellAllReal(string kind, ActionResult ar)
         {
             RunOnMain(() => EnsureScene());
             if (_player == null) { ar.ok = false; ar.note = "未进入存档"; return; }
             object ammoL = RunOnMain(() => PlayerAmmo());
             if (ammoL == null) { ar.ok = false; ar.note = "真实物品栏不可用"; return; }
+            Identifiable.Id? filter = null;
+            if (!string.IsNullOrEmpty(kind))
+            {
+                try
+                {
+                    Identifiable.Id kid = (Identifiable.Id)System.Enum.Parse(typeof(Identifiable.Id), kind, true);
+                    if (PLORT_IDS.Contains(kid)) filter = kid;
+                }
+                catch (Exception) { }
+                if (filter == null) { ar.ok = false; ar.note = "不认识的结晶种类: " + kind; return; }
+            }
             var lines = new System.Text.StringBuilder();
             int units, value;
-            SellAllFromAmmo(ammoL, out units, out value, lines);
-            if (units == 0) { ar.ok = false; ar.note = "物品栏里没有结晶可卖"; return; }
+            SellAllFromAmmo(ammoL, filter, out units, out value, lines);
+            if (units == 0)
+            {
+                ar.ok = false;
+                ar.note = filter == null ? "物品栏里没有结晶可卖" : ("物品栏里没有 " + filter + " 可卖");
+                return;
+            }
             ar.ok = true;
             ar.gains = value;
             ar.count = units;
-            ar.note = "结晶市场清仓：" + units + " 个结晶共 $" + value + "（" + lines.ToString()
+            ar.note = (filter == null ? "结晶市场清仓" : ("已按指令卖出 " + filter))
+                      + "：" + units + " 个结晶共 $" + value + "（" + lines.ToString()
                       + "），当前资金 $" + RunOnMain(() => ReadMoneyReal());
         }
 
-        // 批量结算主体（HTTP 线程）：遍历全部结晶 Id，逐件 当日市价+RegisterSold+
-        // 加钱+扣物品栏，0.12s/件，直到物品栏结晶清零。明细写进 lines。
-        private void SellAllFromAmmo(object ammoL, out int unitsOut, out int valueOut, System.Text.StringBuilder lines)
+        // 批量结算主体（HTTP 线程）：遍历全部结晶 Id（filter 非空只卖该种），逐件
+        // 当日市价+RegisterSold+加钱+扣物品栏，0.12s/件，直到物品栏结晶清零。明细写进 lines。
+        private void SellAllFromAmmo(object ammoL, Identifiable.Id? filter, out int unitsOut, out int valueOut, System.Text.StringBuilder lines)
         {
             unitsOut = 0;
             valueOut = 0;
             EconomyDirector[] econ = RunOnMain(() => UnityEngine.Object.FindObjectsOfType<EconomyDirector>());
             foreach (Identifiable.Id pid in PLORT_IDS)
             {
+                if (filter.HasValue && pid != filter.Value) continue;   // 玩家指令：只卖指定种类
                 object hL = RunOnMain(() => AmmoCall(ammoL, "GetCount", new object[] { pid }));
                 int cnt = hL is int ? (int)hL : 0;
                 if (cnt <= 0) continue;
@@ -2277,7 +2296,7 @@ namespace SlimeBridge
                     System.Threading.Thread.Sleep(300);
                     var lines = new System.Text.StringBuilder();
                     int units, value;
-                    SellAllFromAmmo(playerAmmo, out units, out value, lines);
+                    SellAllFromAmmo(playerAmmo, null, out units, out value, lines);
                     totalUnits += units;
                     totalValue += value;
                     sellRuns++;
@@ -2290,7 +2309,7 @@ namespace SlimeBridge
             System.Threading.Thread.Sleep(300);
             var lines2 = new System.Text.StringBuilder();
             int units2, value2;
-            SellAllFromAmmo(playerAmmo, out units2, out value2, lines2);
+            SellAllFromAmmo(playerAmmo, null, out units2, out value2, lines2);
             totalUnits += units2;
             totalValue += value2;
             ar.ok = totalGot > 0;

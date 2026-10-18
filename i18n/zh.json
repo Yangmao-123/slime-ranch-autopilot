@@ -45,6 +45,10 @@
     "querynearby": {
       "name": "查询周围情况",
       "desc": "实时查询玩家周围30米的史莱姆/结晶/食物与所在区域"
+    },
+    "sellplorts": {
+      "name": "售卖结晶",
+      "desc": "自主经营模式下按玩家指令到结晶市场售卖结晶（当日市价）"
     }
   },
   "fields": {
@@ -52,7 +56,8 @@
     "seconds": "秒数",
     "text": "指令内容",
     "itemId": "ID",
-    "cycleSeconds": "循环秒数"
+    "cycleSeconds": "循环秒数",
+    "sellWhat": "结晶种类（如：粉色、荧光、全部）"
   },
   "dashboard": {
     "subtitle": "NEKO 接管史莱姆牧场运营",
