@@ -94,7 +94,7 @@ public class SlimeBridgeServer
     // 旧版 mod 缺少新动作时插件应提示更新而不是静默失败。
     public const string ModVersion = "0.5.0";
     public const string ModFeatures =
-        "[\"status\",\"action\",\"scan_target\",\"scan_corral\",\"scan_market\",\"scan_food\"," +
+        "[\"status\",\"action\",\"scan_target\",\"scan_corral\",\"scan_market\",\"scan_food\",\"scan_plort\",\"scan_near\"," +
         "\"scan_plort\",\"scan_plot\",\"scan_facilities\",\"ui_buttons\",\"debug_ui\",\"set_overlay\"," +
         "\"tp_market\",\"tp_plot\",\"tp_item\",\"feed_show\",\"save_now\",\"drone_setup\",\"cleanup_drones\",\"market_sell_all\",\"corral_collect\",\"ranch_cycle\"]";
     private readonly HttpListener _listener;

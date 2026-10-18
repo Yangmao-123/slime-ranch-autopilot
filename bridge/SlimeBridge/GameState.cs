@@ -554,6 +554,7 @@ namespace SlimeBridge
                             case "scan_market": ScanMarketReal(ar); break;
                             case "scan_food": ScanFoodReal(ar); break;
                             case "scan_plort": ScanPlortReal(ar); break;
+                            case "scan_near": ScanNearReal(kind, ar); break;
                             case "scan_plot": ScanPlotReal(kind, ar); break;
                             case "scan_facilities": ScanFacilitiesReal(ar); break;
                             case "ui_buttons": UiButtonsReal(ar); break;
@@ -1501,6 +1502,82 @@ namespace SlimeBridge
             catch (Exception e) { ar.ok = false; ar.note = "debug_ui 异常: " + e.Message; return; }
             ar.ok = true;
             ar.note = sb.ToString();
+        }
+
+        // ---- 周边感知（观望模式的"新发现"）：一次返回玩家 radius 内 ----
+        // 史莱姆(含稀有金/幸运/水银)/结晶/食物 按 Id 计数 + 当前区域名，payload 为 JSON。
+        private static readonly HashSet<Identifiable.Id> NEAR_SLIME_IDS = new HashSet<Identifiable.Id>
+        {
+            Identifiable.Id.PINK_SLIME, Identifiable.Id.ROCK_SLIME, Identifiable.Id.TABBY_SLIME,
+            Identifiable.Id.PHOSPHOR_SLIME, Identifiable.Id.RAD_SLIME, Identifiable.Id.BOOM_SLIME,
+            Identifiable.Id.CRYSTAL_SLIME, Identifiable.Id.HONEY_SLIME, Identifiable.Id.HUNTER_SLIME,
+            Identifiable.Id.PUDDLE_SLIME, Identifiable.Id.QUANTUM_SLIME, Identifiable.Id.DERVISH_SLIME,
+            Identifiable.Id.MOSAIC_SLIME, Identifiable.Id.TANGLE_SLIME, Identifiable.Id.FIRE_SLIME,
+            Identifiable.Id.SABER_SLIME,
+            Identifiable.Id.GOLD_SLIME, Identifiable.Id.LUCKY_SLIME, Identifiable.Id.QUICKSILVER_SLIME,
+        };
+
+        private void ScanNearReal(string kind, ActionResult ar)
+        {
+            EnsureScene();
+            if (_player == null) { ar.ok = false; ar.note = "未进入存档"; return; }
+            float radius = 0f;
+            float.TryParse(kind, NumberStyles.Float, CultureInfo.InvariantCulture, out radius);
+            if (radius <= 0f) radius = 30f;
+            Vector3 p = _player.transform.position;
+            var slimes = new Dictionary<Identifiable.Id, int>();
+            var plorts = new Dictionary<Identifiable.Id, int>();
+            var foods = new Dictionary<Identifiable.Id, int>();
+            try
+            {
+                foreach (var idf in UnityEngine.Object.FindObjectsOfType<Identifiable>())
+                {
+                    if (idf == null || idf.gameObject == null) continue;
+                    Identifiable.Id id = idf.id;
+                    if (id == Identifiable.Id.NONE) continue;
+                    if (Vector3.Distance(p, idf.transform.position) > radius) continue;
+                    if (NEAR_SLIME_IDS.Contains(id)) AddOne(slimes, id);
+                    else if (PLORT_IDS.Contains(id)) AddOne(plorts, id);
+                    else if (IsFood(id)) AddOne(foods, id);
+                }
+            }
+            catch (Exception e) { ar.ok = false; ar.note = "扫描异常: " + e.Message; return; }
+            var sb = new System.Text.StringBuilder();
+            sb.Append("{\"zone\":\"").Append(ZoneToName(CurrentZone())).Append("\"");
+            AppendIdCounts(sb, "slimes", slimes);
+            AppendIdCounts(sb, "plorts", plorts);
+            AppendIdCounts(sb, "foods", foods);
+            sb.Append("}");
+            ar.ok = true;
+            ar.area = ZoneToName(CurrentZone());
+            ar.count = TotalOf(slimes) + TotalOf(plorts) + TotalOf(foods);
+            ar.note = "附近扫描：史莱姆" + TotalOf(slimes) + " 结晶" + TotalOf(plorts) + " 食物" + TotalOf(foods) + " 区域=" + ar.area;
+            ar.payload = sb.ToString();
+        }
+
+        private static void AddOne(Dictionary<Identifiable.Id, int> dict, Identifiable.Id id)
+        {
+            dict[id] = dict.ContainsKey(id) ? dict[id] + 1 : 1;
+        }
+
+        private static int TotalOf(Dictionary<Identifiable.Id, int> dict)
+        {
+            int n = 0;
+            foreach (var v in dict.Values) n += v;
+            return n;
+        }
+
+        private static void AppendIdCounts(System.Text.StringBuilder sb, string key, Dictionary<Identifiable.Id, int> dict)
+        {
+            sb.Append(",\"").Append(key).Append("\":[");
+            bool first = true;
+            foreach (var kv in dict)
+            {
+                if (!first) sb.Append(',');
+                first = false;
+                sb.Append("{\"id\":\"").Append(kv.Key).Append("\",\"n\":").Append(kv.Value).Append('}');
+            }
+            sb.Append(']');
         }
 
         // ---- 结晶市场定位（真实：纯只读，供 core 真实走到市场投出结晶换钱）----

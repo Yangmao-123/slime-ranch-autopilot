@@ -431,6 +431,23 @@ class BridgeIOController:
         return {"ok": res.get("ok", False), "count": res.get("count", 0),
                 "note": res.get("note", "围栏收取失败")}
 
+    def scan_near(self, radius: float = 30.0) -> Dict[str, Any]:
+        """周边感知（观望模式新发现）：radius 内史莱姆/结晶/食物按 Id 计数 + 区域名。"""
+        res = self._post_action("scan_near", str(radius))
+        out: Dict[str, Any] = {"ok": bool(res.get("ok")), "note": res.get("note", ""),
+                               "zone": res.get("area", ""),
+                               "slimes": [], "plorts": [], "foods": []}
+        try:
+            payload = json.loads(res.get("payload") or "{}")
+            out["zone"] = payload.get("zone") or out["zone"]
+            for key in ("slimes", "plorts", "foods"):
+                items = payload.get(key) or []
+                out[key] = [{"id": str(i.get("id", "")), "n": int(i.get("n", 0))}
+                            for i in items if isinstance(i, dict)]
+        except Exception:
+            pass
+        return out
+
     def ranch_cycle(self) -> Dict[str, Any]:
         """完整经营循环：市场出发→挨个围栏收取→满包立刻回市场清仓再继续→
         直到地上/收集器都没结晶→回市场门口结束。长流程，超时 10 分钟。"""

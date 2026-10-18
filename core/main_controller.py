@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 import argparse
+import json
 import os
 import sys
 import time
@@ -41,6 +42,19 @@ UPGRADE_KEYWORDS = [
     "Feeder", "Water Trough", "Sprinkler", "Upgrade",
     "升级", "围网", "水槽", "水缸", "气网", "结晶收集", "喂食", "喷灌", "喷洒",
 ]
+
+# ---- 观望模式：周边感知与"新发现" ----
+SLIME_NAMES = {
+    "PINK_SLIME": "粉色史莱姆", "ROCK_SLIME": "岩石史莱姆", "TABBY_SLIME": "虎斑史莱姆",
+    "PHOSPHOR_SLIME": "荧光史莱姆", "RAD_SLIME": "辐射史莱姆", "BOOM_SLIME": "爆炸史莱姆",
+    "CRYSTAL_SLIME": "结晶史莱姆", "HONEY_SLIME": "蜂蜜史莱姆", "HUNTER_SLIME": "猎猫史莱姆",
+    "PUDDLE_SLIME": "水洼史莱姆", "QUANTUM_SLIME": "量子史莱姆", "DERVISH_SLIME": "旋风史莱姆",
+    "MOSAIC_SLIME": "马赛克史莱姆", "TANGLE_SLIME": "藤蔓史莱姆", "FIRE_SLIME": "火焰史莱姆",
+    "SABER_SLIME": "剑齿史莱姆",
+    "GOLD_SLIME": "金史莱姆", "LUCKY_SLIME": "幸运史莱姆", "QUICKSILVER_SLIME": "水银史莱姆",
+}
+RARE_SLIMES = {"GOLD_SLIME", "LUCKY_SLIME", "QUICKSILVER_SLIME"}
+WATCH_SCAN_EVERY = 4   # 每 4 个观望循环扫一次周边（sim_interval 2s → 约 8 秒一次）
 
 
 class Brain:
@@ -225,6 +239,92 @@ class Brain:
             self._say("no-cycle", f"【自主】{cyc.get('note', '')}", every=4)
         self._infra_step()
 
+    # ------------------------------------------------------------ 观望：周边感知
+    def _watch_tick(self) -> None:
+        """观望模式：定期扫玩家周边，主动汇报新发现。
+
+        新物种(跨会话持久 discoveries.json)/稀有史莱姆(金/幸运/水银,每次都喊,
+        限频)/首次进入的区域。NEKO 只在"有新东西"时开口，不闲聊。
+        """
+        if not hasattr(self.io, "scan_near"):
+            return
+        self._watch_scans = getattr(self, "_watch_scans", 0) + 1
+        if self._watch_scans % WATCH_SCAN_EVERY != 1:   # 第一次立即扫，之后每 4 轮
+            return
+        try:
+            near = self.io.scan_near(30.0)
+        except Exception:
+            return
+        if not near.get("ok"):
+            return
+        disc = self._load_discoveries()
+        # 1) 稀有史莱姆：出现就喊（限频，同种 60 秒内不重复）
+        for s in near.get("slimes", []):
+            sid = s.get("id", "")
+            if sid in RARE_SLIMES:
+                name = SLIME_NAMES.get(sid, sid)
+                self._say("rare-" + sid,
+                          f"【稀有】{name}出现了！！就在附近，快看快看！", every=30)
+        # 2) 新物种：第一次见到才记（持久化，下次启动不会再报）
+        new_species = []
+        for s in near.get("slimes", []):
+            sid = s.get("id", "")
+            if sid and sid not in RARE_SLIMES and sid not in disc["seen_slimes"]:
+                disc["seen_slimes"].append(sid)
+                new_species.append((sid, s.get("n", 1)))
+        # 3) 首次进入的区域
+        zone = near.get("zone", "")
+        new_zone = bool(zone) and zone not in disc["zones"]
+        if new_zone:
+            disc["zones"].append(zone)
+        if new_species or new_zone:
+            self._save_discoveries()
+        # 4) 开口汇报
+        if new_species:
+            parts = "、".join(f"「{SLIME_NAMES.get(sid, sid)}」×{n}" for sid, n in new_species)
+            self.c.say(f"【新发现】第一次见到{parts}！NEKO 记下来啦～")
+            self.c.report_discovery(
+                "species-" + "-".join(sid for sid, _ in new_species) + f"-{self.ticks}",
+                "新物种：" + parts)
+        elif new_zone:
+            summary = self._near_summary(near)
+            self.c.say(f"【探索】来到了「{zone}」{summary}")
+            self.c.report_discovery(f"zone-{zone}", f"探索新区域：{zone}")
+        # 面板上的史莱姆列表同步为已发现的物种
+        self.ranch.known_slimes = [SLIME_NAMES.get(s, s) for s in disc["seen_slimes"]]
+
+    def _near_summary(self, near) -> str:
+        bits = []
+        slimes = [s for s in near.get("slimes", []) if s.get("id")]
+        if slimes:
+            top = sorted(slimes, key=lambda s: -s.get("n", 0))[:3]
+            bits.append("、".join(f"{SLIME_NAMES.get(s['id'], s['id'])}×{s['n']}" for s in top))
+        pn = sum(s.get("n", 0) for s in near.get("plorts", []))
+        fn = sum(s.get("n", 0) for s in near.get("foods", []))
+        if pn:
+            bits.append(f"结晶×{pn}")
+        if fn:
+            bits.append(f"食物×{fn}")
+        return ("（附近有 " + "，".join(bits) + "）") if bits else ""
+
+    def _load_discoveries(self) -> dict:
+        if getattr(self, "_disc", None) is None:
+            try:
+                with open(os.path.join(self.s.data_dir, "discoveries.json"), encoding="utf-8") as f:
+                    self._disc = json.load(f)
+            except Exception:
+                self._disc = {}
+            self._disc.setdefault("seen_slimes", [])
+            self._disc.setdefault("zones", [])
+        return self._disc
+
+    def _save_discoveries(self) -> None:
+        try:
+            with open(os.path.join(self.s.data_dir, "discoveries.json"), "w", encoding="utf-8") as f:
+                json.dump(self._disc, f, ensure_ascii=False, indent=1)
+        except Exception:
+            pass
+
     # ------------------------------------------------------------ 需求1 建造/升级（真实 UI 购买）
     def _facilities_signature(self):
         """设施快照（供真实购买前后对比验证）：(kind, 是否空地块, 已拥有升级) 的排序元组。"""
@@ -337,6 +437,8 @@ class Brain:
                 break
 
             if self.mode != "ranch":
+                self.ticks += 1
+                self._watch_tick()
                 self.c.set_state(mode="watch", phase="watching",
                                  funds=self.io.read_money(),
                                  infra=dict(self.ranch.level),
