@@ -26,6 +26,7 @@ from core.bridge import BridgeIOController  # noqa: E402
 from core.real import WalkCaptureIO  # noqa: E402
 from core.ranch import RanchState, decide_build_action, FACILITY_NAMES, record_built  # noqa: E402
 from core.voice import HotkeyListener  # noqa: E402
+from core.names import SLIME_NAMES, RARE_SLIMES  # noqa: E402
 
 # 真实购买菜单的按钮关键词（中英双语：SR1 界面文字跟游戏语言走）。
 # 建造菜单(空地块购买页)三个按钮文字大致为 Corral/Coop/Garden 或 围栏/鸡舍/菜园。
@@ -43,17 +44,7 @@ UPGRADE_KEYWORDS = [
     "升级", "围网", "水槽", "水缸", "气网", "结晶收集", "喂食", "喷灌", "喷洒",
 ]
 
-# ---- 观望模式：周边感知与"新发现" ----
-SLIME_NAMES = {
-    "PINK_SLIME": "粉色史莱姆", "ROCK_SLIME": "岩石史莱姆", "TABBY_SLIME": "虎斑史莱姆",
-    "PHOSPHOR_SLIME": "荧光史莱姆", "RAD_SLIME": "辐射史莱姆", "BOOM_SLIME": "爆炸史莱姆",
-    "CRYSTAL_SLIME": "结晶史莱姆", "HONEY_SLIME": "蜂蜜史莱姆", "HUNTER_SLIME": "猎猫史莱姆",
-    "PUDDLE_SLIME": "水洼史莱姆", "QUANTUM_SLIME": "量子史莱姆", "DERVISH_SLIME": "旋风史莱姆",
-    "MOSAIC_SLIME": "马赛克史莱姆", "TANGLE_SLIME": "藤蔓史莱姆", "FIRE_SLIME": "火焰史莱姆",
-    "SABER_SLIME": "剑齿史莱姆",
-    "GOLD_SLIME": "金史莱姆", "LUCKY_SLIME": "幸运史莱姆", "QUICKSILVER_SLIME": "水银史莱姆",
-}
-RARE_SLIMES = {"GOLD_SLIME", "LUCKY_SLIME", "QUICKSILVER_SLIME"}
+# ---- 观望模式：周边感知与"新发现"（名字映射见 core/names.py，与插件壳共享）----
 WATCH_SCAN_SECONDS = 8.0
 
 

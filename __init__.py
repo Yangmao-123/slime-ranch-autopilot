@@ -480,6 +480,53 @@ class SlimeRanchAutopilotPlugin(NekoPluginBase):
         self._write_command({"type": "command", "text": text})
         return Ok({"text": text})
 
+    @plugin_entry(
+        id="query_nearby",
+        name=tr("entries.querynearby.name", default="查询周围情况"),
+        description=tr(
+            "entries.querynearby.desc",
+            default="实时查询《史莱姆牧场》玩家周围30米的史莱姆/结晶/食物与所在区域。"
+                "用户询问附近有什么史莱姆、周围情况、牧场现状时调用；游戏未启动时返回失败。",
+        ),
+    )
+    async def query_nearby(self, **_):
+        """供 NEKO 的 Agent 调用：直连游戏内 SlimeBridge 实时查询周边。"""
+        import urllib.request
+        base = os.path.dirname(os.path.abspath(__file__))
+        if base not in sys.path:
+            sys.path.insert(0, base)
+        from core.names import display_name
+        host = _get_cfg(self, "bridge_host", "127.0.0.1")
+        port = int(_get_cfg(self, "bridge_port", 8124) or 8124)
+        try:
+            req = urllib.request.Request(
+                f"http://{host}:{port}/api/action",
+                data=json.dumps({"action": "scan_near", "kind": "30"}).encode("utf-8"),
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=5) as r:
+                res = json.loads(r.read().decode("utf-8"))
+        except Exception as e:
+            return Err(SdkError(f"查询失败：游戏或 SlimeBridge 未启动（{e}）"))
+        if not res.get("ok"):
+            return Err(SdkError(res.get("note") or "查询失败（未进入存档？）"))
+        try:
+            payload = json.loads(res.get("payload") or "{}")
+        except Exception:
+            payload = {}
+        zone = str(payload.get("zone") or res.get("area") or "未知")
+        parts = []
+        detail = {}
+        for key, label in (("slimes", "史莱姆"), ("plorts", "结晶"), ("foods", "食物")):
+            items = payload.get(key) or []
+            detail[key] = [{"name": display_name(str(i.get("id", ""))), "n": int(i.get("n", 0))}
+                           for i in items if isinstance(i, dict)]
+            if detail[key]:
+                parts.append(label + "：" + "、".join(f"{d['name']}×{d['n']}" for d in detail[key]))
+        summary = f"区域「{zone}」。" + ("；".join(parts) if parts else "附近30米内没有史莱姆、结晶或食物。")
+        return Ok({"zone": zone, "summary": summary, **detail})
+
     @ui.action(label=tr("actions.capture", default="校准截图"), refresh_context=True)
     @plugin_entry(
         id="capture_calibration",
